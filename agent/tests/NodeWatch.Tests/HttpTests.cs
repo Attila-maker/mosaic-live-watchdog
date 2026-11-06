@@ -117,6 +117,55 @@ internal static class HttpTests
     }
 
     [Test]
+    public static async Task Matrix_login_gets_a_non_expiring_token_and_joins_the_room()
+    {
+        await using var server = new FakeServer((req, _) => req.Url!.AbsolutePath switch
+        {
+            "/_matrix/client/v3/login" => (200, """{"access_token":"syt_new","device_id":"NW1"}"""),
+            _ => (200, """{"room_id":"!room:example.org"}"""),
+        });
+        using var http = new HttpClient();
+        var token = await MatrixAccount.LoginAsync(http, server.Url, "mynode-alerts", "titok \"x\"", "NodeWatch (n)",
+            CancellationToken.None);
+        Assert.Equal("syt_new", token, "token");
+        using (var login = JsonDocument.Parse(server.Requests[0].Body))
+        {
+            Assert.Equal("m.login.password", login.RootElement.GetProperty("type").GetString(), "login type");
+            Assert.Equal("titok \"x\"", login.RootElement.GetProperty("password").GetString(), "password escaped");
+            Assert.True(!login.RootElement.TryGetProperty("refresh_token", out _), "no refresh token asked: the token does not expire");
+        }
+        Assert.Equal(null, await MatrixAccount.JoinAsync(http, server.Url, token, "!room:example.org", CancellationToken.None), "joined");
+        Assert.Equal("/_matrix/client/v3/join/%21room%3Aexample.org", server.Requests[1].Path, "join path");
+        Assert.Equal("Bearer syt_new", server.Requests[1].Headers["Authorization"], "join auth");
+    }
+
+    [Test]
+    public static async Task Matrix_login_reports_the_server_error()
+    {
+        await using var server = new FakeServer((_, _) => (403, """{"errcode":"M_FORBIDDEN","error":"Invalid password"}"""));
+        using var http = new HttpClient();
+        var message = "";
+        try
+        {
+            await MatrixAccount.LoginAsync(http, server.Url, "bot", "rossz", "NodeWatch", CancellationToken.None);
+        }
+        catch (InvalidOperationException e)
+        {
+            message = e.Message;
+        }
+        Assert.True(message.Contains("M_FORBIDDEN") && message.Contains("Invalid password"), "error shown: " + message);
+    }
+
+    [Test]
+    public static void Matrix_room_alias_is_refused_in_the_config()
+    {
+        var c = TestConfig.Create(TestConfig.TempDir());
+        c.Sinks.Add(new SinkOptions { Type = "matrix", Homeserver = "https://matrix-client.matrix.org", RoomId = "#alerts:matrix.org",
+            AccessTokenFile = "matrix.token" });
+        Assert.True(c.Validate().Any(e => e.Contains("belső azonosítója")), "alias refused");
+    }
+
+    [Test]
     public static async Task Both_mode_falls_back_when_the_relay_does_not_take_a_critical_alert()
     {
         var dir = TestConfig.TempDir();

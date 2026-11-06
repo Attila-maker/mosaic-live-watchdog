@@ -20,6 +20,7 @@ internal static class Program
           check            egyszeri lekérdezés: kiírja, mit lát a node-ból (riasztást nem küld)
           test-alert       próbariasztás és „helyreállt” üzenet minden beállított kimenetre
           telegram-chatid  kiírja a Telegram-botnak írt chatek azonosítóit (a ChatId beállításhoz)
+          matrix-login     a Matrix bot bejelentkeztetése: belép a szobába és elmenti az access tokent (sudo-val)
           version          verziószám
 
         Alapértelmezett konfiguráció: /etc/nodewatch/appsettings.json
@@ -68,6 +69,7 @@ internal static class Program
                 "check" => await CheckAsync(config, rpcHttp, cts.Token),
                 "test-alert" => await TestAlertAsync(config, outHttp, cts.Token),
                 "telegram-chatid" => await TelegramChatIdAsync(config, outHttp, cts.Token),
+                "matrix-login" => await MatrixLoginAsync(config, outHttp, cts.Token),
                 _ => Unknown(command),
             };
         }
@@ -197,17 +199,107 @@ internal static class Program
         var token = config.ReadSecret(telegram.BotTokenFile!);
         var doc = await outHttp.GetFromJsonAsync<JsonElement>($"https://api.telegram.org/bot{token}/getUpdates", ct);
         var seen = new HashSet<long>();
+        // Private chat and group: message; channel: channel_post; bot added to a group or channel: my_chat_member.
+        string[] kinds = ["message", "edited_message", "channel_post", "my_chat_member"];
         foreach (var update in doc.GetProperty("result").EnumerateArray())
         {
-            if (!update.TryGetProperty("message", out var message)) continue;
-            var chat = message.GetProperty("chat");
+            var item = kinds.Select(k => update.TryGetProperty(k, out var v) ? v : (JsonElement?)null).FirstOrDefault(v => v is not null);
+            if (item is not { } m || !m.TryGetProperty("chat", out var chat)) continue;
             var id = chat.GetProperty("id").GetInt64();
             if (!seen.Add(id)) continue;
-            var name = chat.TryGetProperty("username", out var u) ? "@" + u.GetString()
-                : chat.TryGetProperty("title", out var t) ? t.GetString() : chat.GetProperty("first_name").GetString();
-            Console.WriteLine($"ChatId: {id}   ({name})");
+            var type = chat.TryGetProperty("type", out var ty) ? ty.GetString() : "?";
+            var name = chat.TryGetProperty("title", out var t) ? t.GetString()
+                : chat.TryGetProperty("username", out var u) ? "@" + u.GetString()
+                : chat.TryGetProperty("first_name", out var f) ? f.GetString() : "";
+            Console.WriteLine($"ChatId: {id}   ({type}: {name})");
         }
-        if (seen.Count == 0) Console.WriteLine("Nincs üzenet. Írj a botnak Telegramon (például /start), majd futtasd újra.");
+        if (seen.Count == 0)
+            Console.WriteLine("Nincs üzenet. Írj a botnak Telegramon (például /start), csoportban küldd el: /start@<botneve>, " +
+                              "majd futtasd újra.");
         return 0;
+    }
+
+    private static async Task<int> MatrixLoginAsync(Config config, HttpClient outHttp, CancellationToken ct)
+    {
+        var matrix = config.Sinks.FirstOrDefault(s => s.Type == "matrix")
+                     ?? throw new ConfigException("Nincs matrix kimenet a konfigurációban: előbb vedd fel a Sinks listába " +
+                                                  "(Homeserver, RoomId, AccessTokenFile).");
+        var path = config.ResolvePath(matrix.AccessTokenFile!);
+        // Checked first, so a login (a new device on the bot account) is not wasted when the token cannot be saved.
+        try
+        {
+            using (new FileStream(path, FileMode.Open, FileAccess.Write)) { }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            Console.WriteLine($"A tokenfájl nem írható: {path} ({e.Message}). Hozd létre, majd futtasd sudo-val:");
+            Console.WriteLine($"  sudo install -m 0640 -o root -g nodewatch /dev/null {path}");
+            Console.WriteLine("  sudo nodewatch matrix-login");
+            return 1;
+        }
+
+        Console.WriteLine($"Matrix szerver: {matrix.Homeserver}   szoba: {matrix.RoomId}");
+        var user = Prompt("A bot felhasználóneve (pl. mynode-alerts vagy @mynode-alerts:matrix.org): ", hidden: false);
+        var password = Prompt("A bot jelszava: ", hidden: true);
+        if (user.Length == 0 || password.Length == 0)
+        {
+            Console.WriteLine("Felhasználónév és jelszó kell.");
+            return 1;
+        }
+
+        string token;
+        try
+        {
+            token = await MatrixAccount.LoginAsync(outHttp, matrix.Homeserver!, user, password,
+                $"NodeWatch ({config.Node.Name})", ct);
+        }
+        catch (Exception e) when (e is InvalidOperationException or HttpRequestException or TaskCanceledException &&
+                                  !ct.IsCancellationRequested)
+        {
+            Console.WriteLine($"HIBA: {e.Message}");
+            return 1;
+        }
+        File.WriteAllText(path, token + "\n");
+        Console.WriteLine($"Bejelentkezés: OK, az access token mentve: {path}");
+
+        string? joinError;
+        try
+        {
+            joinError = await MatrixAccount.JoinAsync(outHttp, matrix.Homeserver!, token, matrix.RoomId!, ct);
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
+        {
+            joinError = e.Message;
+        }
+        if (joinError is not null)
+        {
+            Console.WriteLine($"Belépés a szobába ({matrix.RoomId}): HIBA – {joinError}");
+            Console.WriteLine("Hívd meg a botot a szobába a saját fiókodról, majd futtasd újra ezt a parancsot.");
+            return 1;
+        }
+        Console.WriteLine($"Belépés a szobába ({matrix.RoomId}): OK. Próba: sudo -u nodewatch nodewatch test-alert");
+        return 0;
+    }
+
+    private static string Prompt(string text, bool hidden)
+    {
+        Console.Write(text);
+        if (!hidden || Console.IsInputRedirected) return (Console.ReadLine() ?? "").Trim();
+        var value = new System.Text.StringBuilder();
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter) break;
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (value.Length > 0) value.Length--;
+            }
+            else if (!char.IsControl(key.KeyChar))
+            {
+                value.Append(key.KeyChar);
+            }
+        }
+        Console.WriteLine();
+        return value.ToString();
     }
 }

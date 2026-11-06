@@ -84,6 +84,9 @@ internal sealed class Config
                 case "matrix":
                     if (!Uri.TryCreate(s.Homeserver, UriKind.Absolute, out _)) e.Add($"{s.DisplayName}: Homeserver nem érvényes URL.");
                     if (string.IsNullOrWhiteSpace(s.RoomId)) e.Add($"{s.DisplayName}: RoomId kötelező.");
+                    else if (!s.RoomId.StartsWith('!') || !s.RoomId.Contains(':'))
+                        e.Add($"{s.DisplayName}: RoomId a szoba belső azonosítója legyen (!xxxx:szerver), nem a címe (#…). " +
+                              "Elementben: Szoba beállításai → Speciális → Belső szobaazonosító.");
                     if (string.IsNullOrWhiteSpace(s.AccessTokenFile)) e.Add($"{s.DisplayName}: AccessTokenFile kötelező.");
                     break;
                 case "safechat":
@@ -108,9 +111,12 @@ internal sealed class Config
     }
 
     /// <summary>Reads a secret file (relative paths are relative to the config's folder). The content is trimmed.</summary>
+    /// <summary>A path from the config: relative paths are relative to the config file's folder.</summary>
+    public string ResolvePath(string path) => Path.IsPathRooted(path) ? path : Path.Combine(BaseDirectory, path);
+
     public string ReadSecret(string path)
     {
-        var full = Path.IsPathRooted(path) ? path : Path.Combine(BaseDirectory, path);
+        var full = ResolvePath(path);
         if (!File.Exists(full)) throw new ConfigException($"A titokfájl nem található: {full}");
         string value;
         try

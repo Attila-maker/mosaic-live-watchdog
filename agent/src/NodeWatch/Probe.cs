@@ -17,13 +17,13 @@ internal sealed class JsonRpc(HttpClient http, string url)
         HttpResponseMessage response;
         try
         {
-            response = await http.PostAsJsonAsync(url, new
+            response = await http.PostAsync(url, NodeWatch.Sinks.Http.Json(new
             {
                 jsonrpc = "2.0",
                 id = Interlocked.Increment(ref _id),
                 method,
                 @params = parameters,
-            }, ct);
+            }), ct);
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
         {

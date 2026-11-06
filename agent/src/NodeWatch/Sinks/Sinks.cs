@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
 
 namespace NodeWatch.Sinks;
 
@@ -24,6 +25,13 @@ internal interface ISink
 
 internal static class Http
 {
+    private static readonly JsonSerializerOptions JsonOptions =
+        new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    /// <summary>A JSON body with Content-Length (JsonContent is sent chunked, which some servers and proxies refuse).</summary>
+    public static StringContent Json(object value) =>
+        new(JsonSerializer.Serialize(value, JsonOptions), Encoding.UTF8, "application/json");
+
     /// <summary>2xx: ok; 408, 429 and 5xx: retry later; other 4xx: the request itself is wrong, retrying will not help.</summary>
     public static async Task<SendResult> SendAsync(HttpClient http, HttpRequestMessage request, CancellationToken ct)
     {
@@ -72,7 +80,7 @@ internal sealed class TelegramSink(HttpClient http, string name, int minRank, st
         if (text.Length > 4000) text = text[..4000];
         var request = new HttpRequestMessage(HttpMethod.Post, $"https://api.telegram.org/bot{botToken}/sendMessage")
         {
-            Content = JsonContent.Create(new
+            Content = Http.Json(new
             {
                 chat_id = chatId,
                 text,
@@ -102,7 +110,7 @@ internal sealed class MatrixSink(HttpClient http, string name, int minRank, stri
                   Uri.EscapeDataString(e.Id);
         var request = new HttpRequestMessage(HttpMethod.Put, url)
         {
-            Content = JsonContent.Create(new
+            Content = Http.Json(new
             {
                 msgtype = "m.notice",
                 body = plain,
@@ -115,8 +123,64 @@ internal sealed class MatrixSink(HttpClient http, string name, int minRank, stri
     }
 }
 
-/// <summary>SafeChat integration alerts (POST /api/ops/alerts, docs/integration-alerts-design.md). Heartbeats never go
-/// here.</summary>
+/// <summary>
+/// Setting up the Matrix output: logs in the bot user with the legacy password login. Without "refresh_token" the server
+/// gives a token that does not expire, also on servers with the Matrix Authentication Service (matrix.org), where the
+/// token shown in Element's settings is short-lived. Then joins the room, which also accepts a pending invite.
+/// </summary>
+internal static class MatrixAccount
+{
+    public static async Task<string> LoginAsync(HttpClient http, string homeserver, string user, string password,
+        string deviceName, CancellationToken ct)
+    {
+        var body = new
+        {
+            type = "m.login.password",
+            identifier = new { type = "m.id.user", user },
+            password,
+            initial_device_display_name = deviceName,
+        };
+        using var response = await http.PostAsync($"{homeserver.TrimEnd('/')}/_matrix/client/v3/login", Http.Json(body), ct);
+        var json = await ReadJsonAsync(response, ct);
+        if (!response.IsSuccessStatusCode || json?.TryGetProperty("access_token", out var token) != true ||
+            token.GetString() is not { Length: > 0 } value)
+            throw new InvalidOperationException($"a bejelentkezés nem sikerült: {Describe(response, json)}");
+        return value;
+    }
+
+    /// <summary>Null on success, otherwise the error.</summary>
+    public static async Task<string?> JoinAsync(HttpClient http, string homeserver, string accessToken, string roomId,
+        CancellationToken ct)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post,
+            $"{homeserver.TrimEnd('/')}/_matrix/client/v3/join/{Uri.EscapeDataString(roomId)}")
+        {
+            Content = Http.Json(new { }),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using var response = await http.SendAsync(request, ct);
+        return response.IsSuccessStatusCode ? null : Describe(response, await ReadJsonAsync(response, ct));
+    }
+
+    private static async Task<JsonElement?> ReadJsonAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            return await response.Content.ReadFromJsonAsync<JsonElement>(ct);
+        }
+        catch (Exception e) when (e is JsonException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    private static string Describe(HttpResponseMessage response, JsonElement? json) =>
+        json is { ValueKind: JsonValueKind.Object } j && j.TryGetProperty("errcode", out var code)
+            ? $"{code.GetString()}: {(j.TryGetProperty("error", out var error) ? error.GetString() : "")} (HTTP {(int)response.StatusCode})"
+            : $"HTTP {(int)response.StatusCode}";
+}
+
+/// <summary>SafeChat integration alerts (POST /api/ops/alerts, see docs/event-format.md). Heartbeats never go here.</summary>
 internal sealed class SafeChatSink(HttpClient http, string name, int minRank, string url, string token) : ISink
 {
     public string Name => name;

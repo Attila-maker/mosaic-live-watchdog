@@ -84,10 +84,14 @@ Telegram and Matrix get a formatted text message, SafeChat and the relay get the
 
 ## Install (Ubuntu 24.04)
 
-You need a release package `nodewatch-<version>.tar.gz` (from the Releases page, or build it with `agent/build.sh`).
+You need a release package `nodewatch-<version>.tar.gz` (from the
+[Releases](https://github.com/Attila-maker/mosaic-live-watchdog/releases) page, or build it with `agent/build.sh`).
 On the node:
 
 ```bash
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.0/nodewatch-0.1.0.tar.gz
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.0/nodewatch-0.1.0.tar.gz.sha256
+sha256sum -c nodewatch-0.1.0.tar.gz.sha256
 tar -xzf nodewatch-0.1.0.tar.gz
 cd nodewatch-0.1.0
 sudo ./install.sh
@@ -141,17 +145,96 @@ them (`BotTokenFile`, `AccessTokenFile`, `TokenFile`, `NodeTokenFile`).
 
 ### Outputs
 
+`Sinks` is a list: you can use several outputs at once. Each output gets the alerts at or above its own
+`MinSeverity` (`info`, `warning` or `critical`); the "resolved" message goes to every output that got the alert.
+After every change, try it and restart the service:
+
+```bash
+sudo -u nodewatch nodewatch test-alert
+sudo systemctl restart nodewatch
+```
+
+#### Telegram
+
+1. In Telegram, open **@BotFather**, send `/newbot`, and choose a display name and a username ending in `bot`.
+   BotFather answers with a token like `7012345678:AAH…`. Keep it secret: with it anyone can post as your bot.
+2. Save the token on the node, alone on one line:
+
+   ```bash
+   sudo install -m 0640 -o root -g nodewatch /dev/null /etc/nodewatch/telegram.token
+   sudo nano /etc/nodewatch/telegram.token
+   ```
+
+3. Find your bot in Telegram and send it `/start` (a bot cannot write to you first).
+4. Add the output with a placeholder chat id, then ask NodeWatch for the real one:
+
+   ```jsonc
+   { "Type": "telegram", "BotTokenFile": "/etc/nodewatch/telegram.token", "ChatId": "IDE_JON_A_CHAT_ID", "MinSeverity": "warning" }
+   ```
+
+   ```bash
+   sudo -u nodewatch nodewatch telegram-chatid
+   # ChatId: 123456789   (private: Attila)
+   ```
+
+   Put the number into `ChatId` (as a string) and run `test-alert`.
+
+- **Group:** add the bot to the group and send `/start@<your_bot>` in the group, then run `telegram-chatid` again.
+  Group ids are negative, for example `-1001234567890`.
+- **Channel:** add the bot to the channel as an administrator who may post messages, post something in the channel,
+  then run `telegram-chatid`.
+- `telegram-chatid` reads the bot's recent updates, which Telegram keeps for 24 hours: run it soon after the
+  message.
+- Critical alerts arrive with sound; warnings and "resolved" messages arrive silently.
+
+#### Matrix
+
+NodeWatch posts into one Matrix room as a separate bot user, as `m.notice` messages. It does not do Matrix end-to-end
+encryption, so use a room without encryption.
+
+1. **Create a bot account** on your homeserver, separate from your own account. For example on matrix.org: open
+   <https://app.element.io> in a private browser window and register a user such as `mynode-alerts`.
+2. **Create the room** with your own account (for example "Node alerts"), and switch **off** "Enable end-to-end
+   encryption" when you create it (it cannot be switched off later). Invite the bot user
+   (`@mynode-alerts:matrix.org`).
+3. **Find the room id:** in Element, *Room settings → Advanced → Internal room ID*. It starts with `!`, for example
+   `!AbCdEfGh:matrix.org`. The room address (`#name:server`) does not work here.
+4. **Add the output** and create the (empty) token file:
+
+   ```jsonc
+   { "Type": "matrix", "Homeserver": "https://matrix-client.matrix.org", "RoomId": "!AbCdEfGh:matrix.org",
+     "AccessTokenFile": "/etc/nodewatch/matrix.token", "MinSeverity": "warning" }
+   ```
+
+   ```bash
+   sudo install -m 0640 -o root -g nodewatch /dev/null /etc/nodewatch/matrix.token
+   ```
+
+   `Homeserver` is the client API address of the server. For matrix.org it is `https://matrix-client.matrix.org`;
+   for another server, look at `https://<server>/.well-known/matrix/client` (`m.homeserver.base_url`).
+5. **Log the bot in:**
+
+   ```bash
+   sudo nodewatch matrix-login
+   ```
+
+   It asks for the bot's user name and password. It logs in, saves the access token into the token file and joins the
+   room (this also accepts the invite). The password is not stored.
+6. Run `sudo -u nodewatch nodewatch test-alert`.
+
+Do not copy the access token from Element's settings: on servers that use the Matrix Authentication Service
+(matrix.org since 2025) that token can expire within minutes. The token from `matrix-login` does not expire; it stays
+valid until you sign out the "NodeWatch" session of the bot (for example in Element, *Settings → Sessions*).
+
+#### SafeChat
+
 ```jsonc
-{ "Type": "telegram", "BotTokenFile": "/etc/nodewatch/telegram.token", "ChatId": "123456789", "MinSeverity": "warning" }
-{ "Type": "matrix", "Homeserver": "https://matrix.org", "RoomId": "!room:matrix.org",
-  "AccessTokenFile": "/etc/nodewatch/matrix.token", "MinSeverity": "warning" }
 { "Type": "safechat", "Url": "https://chat.example.com/api/ops/alerts",
   "TokenFile": "/etc/nodewatch/safechat.token", "MinSeverity": "warning" }
 ```
 
-Matrix messages are sent as `m.notice` to an existing room the bot user has joined.
-The SafeChat output posts the CloudEvent with `Authorization: Bearer <token>` and `X-SafeChat: 1`; the token is an
-integration token created by the SafeChat admin and bound to one user.
+The SafeChat output posts the CloudEvent with `Authorization: Bearer <token>` and `X-SafeChat: 1`. The token is an
+integration token that only the SafeChat admin can create, bound to one user; the alerts appear for that user.
 
 ## Commands
 
@@ -162,6 +245,7 @@ nodewatch [command] [--config <file>] [--verbose]
   check            one-time query: prints what NodeWatch sees, sends nothing
   test-alert       sends a test alert and a "resolved" message to every configured target
   telegram-chatid  lists the chat ids that wrote to the Telegram bot
+  matrix-login     logs the Matrix bot in, joins the room and saves the access token (run with sudo)
   version          prints the version
 ```
 
@@ -194,7 +278,6 @@ runner without NuGet packages: `dotnet run --project agent/tests/NodeWatch.Tests
   tokens, stores the output channel secrets encrypted, forwards alerts, and alerts by itself when a node stops sending
   heartbeats.
 - SafeChat integration endpoint (`POST /api/ops/alerts`) on the SafeChat side.
-- Release packages on GitHub.
 
 ## License
 

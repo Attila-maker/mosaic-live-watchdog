@@ -9,18 +9,28 @@ kell futtatni (SSH vagy PuTTY), egy `sudo` joggal rendelkező felhasználóval.
 - A node RPC portjai a szokásos helyen vannak: relay chain `127.0.0.1:8844`, parachain `127.0.0.1:9944`.
 - Internetkapcsolat az apt-hoz (a .NET 10 runtime telepítéséhez) és a riasztási célhoz (pl. Telegram).
 
-## 1. A csomag felmásolása a node-ra
+## 1. A csomag letöltése a node-ra
 
-A kiadási csomag neve `nodewatch-<verzió>.tar.gz` (a GitHub *Releases* oldalról, vagy a forrásból az
-`agent/build.sh` készíti el).
+A kiadási csomag neve `nodewatch-<verzió>.tar.gz`. A legegyszerűbb, ha közvetlenül a node-on töltöd le a GitHub
+*Releases* oldaláról, és ellenőrzöd az ellenőrzőösszegét:
 
-Windowsról, PuTTY `pscp`-vel (a `<felhasználó>` és a `<node-ip>` a saját adataid):
+```bash
+cd ~
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.0/nodewatch-0.1.0.tar.gz
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.0/nodewatch-0.1.0.tar.gz.sha256
+sha256sum -c nodewatch-0.1.0.tar.gz.sha256
+```
+
+Az utolsó parancsnak `nodewatch-0.1.0.tar.gz: OK` választ kell adnia.
+
+Ha a node-ról nem éred el a GitHubot, töltsd le Windowson, és másold fel például PuTTY `pscp`-vel (a `<felhasználó>` és
+a `<node-ip>` a saját adataid), WinSCP-vel vagy Total Commander SFTP-kapcsolattal:
 
 ```
 pscp nodewatch-0.1.0.tar.gz <felhasználó>@<node-ip>:
 ```
 
-WinSCP vagy Total Commander SFTP-kapcsolat is jó. A fájl a felhasználód home mappájába kerül.
+A csomagot a forrásból az `agent/build.sh` is elkészíti.
 
 ## 2. Telepítés
 
@@ -64,10 +74,14 @@ A szolgáltatás ekkor még nem indul el, előbb be kell állítani.
    sudo -u nodewatch nodewatch telegram-chatid
    ```
 
-   Ez kiírja például: `ChatId: 123456789   (@felhasznalonev)`. Ezt a számot írd be a beállításba (következő lépés).
+   Ez kiírja például: `ChatId: 123456789   (private: Attila)`. Ezt a számot írd be a beállításba (következő lépés).
+   A Telegram a bot üzeneteit 24 óráig őrzi meg, ezért a `/start` után nem sokkal futtasd.
 
-Ha csoportba szeretnéd a riasztásokat, add hozzá a botot a csoporthoz, írj a csoportba, és futtasd újra a
-`telegram-chatid` parancsot: a csoport azonosítója negatív szám (pl. `-1001234567890`).
+- **Csoport:** add hozzá a botot a csoporthoz, a csoportban küldd el: `/start@<botod_neve>`, majd futtasd újra a
+  `telegram-chatid` parancsot. A csoport azonosítója negatív szám (pl. `-1001234567890`).
+- **Csatorna:** add hozzá a botot a csatornához adminisztrátorként, üzenetküldési joggal, írj valamit a csatornába,
+  majd futtasd a `telegram-chatid` parancsot.
+- A kritikus riasztások hanggal érkeznek, a figyelmeztetések és a „helyreállt” üzenetek csendben.
 
 ## 4. Beállítások
 
@@ -192,23 +206,57 @@ sudo ./uninstall.sh --purge    # mindent töröl, a nodewatch felhasználót is
 
 ## További kimenetek
 
-**Matrix:** hozz létre egy bot felhasználót, lépj be vele a szobába, és mentsd az access tokenjét a
-`/etc/nodewatch/matrix.token` fájlba (ugyanúgy, mint a Telegram tokent). A `Sinks` listába:
+### Matrix
 
-```jsonc
-{ "Type": "matrix", "Homeserver": "https://matrix.org", "RoomId": "!szoba:matrix.org",
-  "AccessTokenFile": "/etc/nodewatch/matrix.token", "MinSeverity": "warning" }
-```
+A NodeWatch egy külön bot felhasználóként ír egy Matrix szobába (`m.notice` üzenetként). Matrix végponttól végpontig
+titkosítást nem végez, ezért titkosítás nélküli szobát használj.
 
-**SafeChat:** a SafeChat admin felületén az admin hoz létre integrációs tokent egy felhasználóhoz rendelve. Ezt a
-`/etc/nodewatch/safechat.token` fájlba mentsd:
+1. **Bot fiók:** hozz létre egy külön felhasználót a saját fiókodtól függetlenül. matrix.org-on például egy privát
+   böngészőablakban a <https://app.element.io> oldalon regisztrálj egy `mynode-alerts` nevű felhasználót.
+2. **Szoba:** a saját fiókoddal hozz létre egy szobát (pl. „Node riasztások”), és létrehozáskor kapcsold **ki** a
+   „Végpontok közötti titkosítás engedélyezése” (Enable end-to-end encryption) kapcsolót – később már nem lehet.
+   Hívd meg a bot felhasználót (`@mynode-alerts:matrix.org`).
+3. **Szobaazonosító:** Elementben *Szoba beállításai → Speciális → Belső szobaazonosító* (Room settings → Advanced →
+   Internal room ID). `!`-lel kezdődik, pl. `!AbCdEfGh:matrix.org`. A szoba címe (`#nev:szerver`) itt nem jó.
+4. **Beállítás:** vedd fel a kimenetet a `Sinks` listába, és hozd létre az üres tokenfájlt:
+
+   ```jsonc
+   { "Type": "matrix", "Homeserver": "https://matrix-client.matrix.org", "RoomId": "!AbCdEfGh:matrix.org",
+     "AccessTokenFile": "/etc/nodewatch/matrix.token", "MinSeverity": "warning" }
+   ```
+
+   ```bash
+   sudo install -m 0640 -o root -g nodewatch /dev/null /etc/nodewatch/matrix.token
+   ```
+
+   A `Homeserver` a szerver kliens-API címe: matrix.org esetén `https://matrix-client.matrix.org`. Más szervernél a
+   `https://<szerver>/.well-known/matrix/client` címen, az `m.homeserver.base_url` mezőben találod.
+5. **A bot bejelentkeztetése:**
+
+   ```bash
+   sudo nodewatch matrix-login
+   ```
+
+   Bekéri a bot felhasználónevét és jelszavát, bejelentkezik, az access tokent a tokenfájlba menti, és belép a
+   szobába (ezzel a meghívást is elfogadja). A jelszót nem tárolja.
+6. **Próba:** `sudo -u nodewatch nodewatch test-alert`, majd `sudo systemctl restart nodewatch`.
+
+Az access tokent ne az Element beállításaiból másold ki: a Matrix Authentication Service-t használó szervereken
+(a matrix.org 2025 óta ilyen) az néhány perc alatt lejárhat. A `matrix-login` által kért token nem jár le; addig
+érvényes, amíg a bot „NodeWatch” munkamenetét ki nem jelentkezteted (Elementben: *Beállítások → Munkamenetek*).
+
+### SafeChat
+
+A SafeChat admin felületén az admin hoz létre integrációs tokent egy felhasználóhoz rendelve; a riasztások ennél a
+felhasználónál jelennek meg. A tokent a `/etc/nodewatch/safechat.token` fájlba mentsd:
 
 ```jsonc
 { "Type": "safechat", "Url": "https://<safechat-szerver>/api/ops/alerts",
   "TokenFile": "/etc/nodewatch/safechat.token", "MinSeverity": "warning" }
 ```
 
-Több kimenet is megadható egyszerre; mindegyik a saját `MinSeverity` szintje szerint kapja a riasztásokat.
+Több kimenet is megadható egyszerre; mindegyik a saját `MinSeverity` szintje szerint kapja a riasztásokat, a
+„helyreállt” üzenetet pedig minden kimenet megkapja, amelyik a riasztást megkapta.
 
 ## Hibaelhárítás
 
@@ -219,6 +267,7 @@ Több kimenet is megadható egyszerre; mindegyik a saját `MinSeverity` szintje 
 | `Lemez: HIBA – … mappa nem létezik` | Állítsd a `Node.DataPath` értékét a node adatmappájára |
 | `Validátor: nem található` | Rossz a `Node.ValidatorAddress` |
 | Nem jön Telegram üzenet | `sudo -u nodewatch nodewatch test-alert` kiírja a hibát. Gyakori ok: rossz token, rossz ChatId, vagy nem küldtél `/start`-ot a botnak |
+| Nem jön Matrix üzenet (`M_FORBIDDEN` vagy `M_UNKNOWN_TOKEN` a naplóban) | `M_FORBIDDEN`: a bot nincs bent a szobában – hívd meg, és futtasd újra: `sudo nodewatch matrix-login`. `M_UNKNOWN_TOKEN`: a bot munkamenetét kijelentkeztették – futtasd újra a `matrix-login` parancsot |
 | `Már fut egy NodeWatch ezzel az állapotmappával` | Kézzel indítottad a `run` parancsot, miközben a szolgáltatás is fut. Kézzel csak a `check` és a `test-alert` kell |
 | „A relay chain peerjei nem kérdezhetők le” figyelmeztetés | A relay chain RPC nem engedi a `system_peers` hívást. Helyi (127.0.0.1) kapcsolaton ez alapból engedélyezett; nézd meg, nincs-e `--rpc-methods safe` a relay chain kapcsolói között |
 | „A NodeWatch nem tudja ellenőrizni a node-ot” | Öt ellenőrzés egymás után hibával állt le; ilyenkor újraindítás sincs. A hiba oka a naplóban: `journalctl -u nodewatch -n 50` |
