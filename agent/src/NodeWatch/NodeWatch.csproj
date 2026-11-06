@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>nodewatch</AssemblyName>
+    <RootNamespace>NodeWatch</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>0.1.0</Version>
+    <!-- Only the base class library: no NuGet package is needed to build or run it. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="NodeWatch.Tests" />
+  </ItemGroup>
+
+</Project>

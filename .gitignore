@@ -1,0 +1,14 @@
+bin/
+obj/
+out/
+*.user
+*.suo
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# Never commit secrets or a real node config
+*.token
+*.secret
+/agent/**/appsettings.json

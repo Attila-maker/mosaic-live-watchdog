@@ -1,0 +1,51 @@
+[Unit]
+Description=NodeWatch - Mosaic node watchdog and alerting
+Documentation=https://github.com/Attila-maker/mosaic-live-watchdog
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=nodewatch
+Group=nodewatch
+ExecStart=/usr/bin/dotnet /opt/nodewatch/nodewatch.dll run --config /etc/nodewatch/appsettings.json
+Restart=always
+RestartSec=10
+# Exit code 2 = config error: restarting would not help, the unit stays failed until the config is fixed.
+RestartPreventExitStatus=2
+TimeoutStopSec=20
+
+# /var/lib/nodewatch: state.json (restart limit, open alerts) and the outbox queues.
+StateDirectory=nodewatch
+StateDirectoryMode=0750
+UMask=0027
+
+Environment=DOTNET_EnableDiagnostics=0
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+Environment=HOME=/var/lib/nodewatch
+
+# Hardening. The agent only needs: HTTP to the local RPC ports and the alert targets,
+# "systemctl is-active" and "systemctl restart <chain unit>" (allowed by the polkit rule).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+# The validator keys are never needed: keep them out of reach even if the user's rights change.
+InaccessiblePaths=-/opt/mosaic/secrets
+
+[Install]
+WantedBy=multi-user.target

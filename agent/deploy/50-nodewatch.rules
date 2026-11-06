@@ -1,0 +1,11 @@
+// NodeWatch: the "nodewatch" user may restart the Mosaic chain service, and nothing else.
+// Place: /etc/polkit-1/rules.d/50-nodewatch.rules (polkit reloads it automatically).
+// install.sh replaces the unit name below if NODEWATCH_CHAIN_UNIT is set.
+polkit.addRule(function (action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "nodewatch" &&
+        action.lookup("unit") == "mosaic-chain-mainnet.service" &&
+        action.lookup("verb") == "restart") {
+        return polkit.Result.YES;
+    }
+});
