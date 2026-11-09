@@ -254,6 +254,22 @@ internal static class AgentTests
     }
 
     [Test]
+    public static async Task Unknown_peer_roles_fall_back_to_the_peer_count()
+    {
+        var w = NewWorld();
+        w.Probe.PeersError = "system_peers: RPC call is unsafe to be called externally";
+        w.Probe.HealthPeers = 8;
+        await w.RunFor(TimeSpan.FromMinutes(30));
+        Assert.Equal(0, w.Events.Count, "no alert while there are peers");
+
+        w.Probe.HealthPeers = 0;
+        await w.RunFor(TimeSpan.FromMinutes(5));
+        Assert.Equal(1, w.Titled("A relay chain-nek nincs egy peere sem").Count, "no peer at all is critical");
+        await w.RunFor(TimeSpan.FromMinutes(6));
+        Assert.Equal(1, w.Restarter.Count, "and a restart reason");
+    }
+
+    [Test]
     public static async Task Disk_error_becomes_a_warning()
     {
         var w = NewWorld();

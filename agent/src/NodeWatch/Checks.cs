@@ -126,24 +126,42 @@ internal sealed class CheckEvaluator(Config config)
             var facts = new Dictionary<string, object?>
             {
                 ["relayBest"] = relayBest, ["fullPeers"] = peers?.SyncSources, ["nonePeers"] = peers?.None,
-                ["totalPeers"] = peers?.Total,
+                ["totalPeers"] = s.RelayTotalPeers,
             };
-            var peerText = peers is null
-                ? "A peerek nem kérdezhetők le."
-                : $"Full peer: {peers.SyncSources}, összes peer: {peers.Total} (ebből szerep nélküli, NONE: {peers.None}).";
+            var peerText = peers is not null
+                ? $"Full peer: {peers.SyncSources}, összes peer: {peers.Total} (ebből szerep nélküli, NONE: {peers.None})."
+                : s.RelayTotalPeers is { } count ? $"Peerek: {count} (a szerepük nem kérdezhető le)."
+                : "A peerek nem kérdezhetők le.";
             var stall = now - _relay.LastChange;
             results.Add(stall >= TimeSpan.FromMinutes(c.RelayStallMinutes)
                 ? new(CheckNames.RelayBlocks, Level.Critical, "A relay chain nem halad",
                     $"{Text.Duration(stall)} a #{_relay.Last} blokkon áll. {peerText}", _relay.LastChange, facts)
                 : new(CheckNames.RelayBlocks, Level.Ok, "A relay chain újra halad", $"A #{relayBest} blokknál tart.", null, facts));
 
-            if (peers is null)
+            if (peers is null && s.RelayTotalPeers is { } total)
+            {
+                // The relay chain RPC only allows safe methods: the roles (FULL / NONE) are unknown, only the count is.
+                // No peer at all is still a stall reason; a stall with only NONE peers shows in relay.block_progress.
+                if (total == 0)
+                {
+                    _noFullPeersSince ??= now;
+                    results.Add(new(CheckNames.RelayFullPeers, Level.Critical, "A relay chain-nek nincs egy peere sem",
+                        "Peer nélkül a node nem tud szinkronizálni. (A peerek szerepe nem kérdezhető le, mert a relay chain " +
+                        "RPC csak biztonságos hívásokat enged.)", _noFullPeersSince, facts));
+                }
+                else
+                {
+                    _noFullPeersSince = null;
+                    results.Add(new(CheckNames.RelayFullPeers, Level.Ok, "A relay chain-nek újra van peere",
+                        $"Peerek: {total} (a szerepük nem kérdezhető le).", null, facts));
+                }
+            }
+            else if (peers is null)
             {
                 // Not a restart reason: the node may simply not allow system_peers ("unsafe" RPC method).
                 _noFullPeersSince = null;
                 results.Add(new(CheckNames.RelayFullPeers, Level.Warning, "A relay chain peerjei nem kérdezhetők le",
-                    $"{s.RelayPeersError}. A system_peers „unsafe” RPC-hívás; a relay chain RPC-n engedélyezni kell " +
-                    "(helyi kapcsolaton ez az alapértelmezés).", now, facts));
+                    $"{s.RelayPeersError}. Sem a system_peers, sem a system_health nem adott választ.", now, facts));
             }
             else if (peers.SyncSources == 0)
             {

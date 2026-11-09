@@ -142,7 +142,8 @@ internal sealed class NodeOptions
     /// <summary>SS58 address or 0x public key of the validator; empty: no validator-state check.</summary>
     public string ValidatorAddress { get; set; } = "";
 
-    public string RelayRpc { get; set; } = "http://127.0.0.1:8844";
+    /// <summary>The embedded relay chain's RPC (Mosaic: --experimental-rpc-endpoint listen-addr=0.0.0.0:9954,methods=safe).</summary>
+    public string RelayRpc { get; set; } = "http://127.0.0.1:9954";
     public string ParaRpc { get; set; } = "http://127.0.0.1:9944";
     public string DataPath { get; set; } = "/var/lib/mosaic-mainnet";
 

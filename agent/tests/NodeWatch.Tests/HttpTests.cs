@@ -277,6 +277,25 @@ internal static class HttpTests
         Assert.Equal(null, s.RelayError, "relay works");
         Assert.Equal(16L, s.RelayBest, "block number");
         Assert.True(s.RelayPeersError!.Contains("Method not found"), "peer error kept apart");
+        Assert.Equal(null, s.RelayTotalPeers, "system_health failed too: no count");
+    }
+
+    [Test]
+    public static async Task NodeProbe_counts_relay_peers_with_system_health_when_system_peers_is_unsafe()
+    {
+        await using var relay = new FakeServer((_, body) =>
+            body.Contains("system_peers")
+                ? (200, """{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"RPC call is unsafe to be called externally"}}""")
+                : body.Contains("system_health")
+                    ? (200, """{"jsonrpc":"2.0","id":1,"result":{"peers":7,"isSyncing":false,"shouldHavePeers":true}}""")
+                    : (200, RpcResult(body, (_, _) => new { number = "0x203c796" })));
+        var config = TestConfig.Create(TestConfig.TempDir());
+        config.Node.RelayRpc = relay.Url;
+        using var http = new HttpClient();
+        var s = await new NodeProbe(config, http, new FixedServices()).CollectAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+        Assert.Equal(33802134L, s.RelayBest, "block number");
+        Assert.Equal(null, s.RelayPeers, "roles unknown");
+        Assert.Equal(7, s.RelayTotalPeers, "count from system_health");
     }
 
     [Test]

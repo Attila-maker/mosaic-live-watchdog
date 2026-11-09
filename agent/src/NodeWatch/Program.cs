@@ -146,6 +146,7 @@ internal static class Program
         Console.WriteLine($"Node: {config.Node.Name} ({config.Node.Network})");
         Console.WriteLine(s.RelayError is not null ? $"Relay chain:  HIBA – {s.RelayError}"
             : s.RelayPeers is { } p ? $"Relay chain:  #{s.RelayBest}, peerek: {p.Total} (FULL {p.Full}, AUTHORITY {p.Authority}, NONE {p.None}, LIGHT {p.Light})"
+            : s.RelayTotalPeers is { } t ? $"Relay chain:  #{s.RelayBest}, peerek: {t} (a szerepük nem kérdezhető le: a relay chain RPC csak biztonságos hívásokat enged)"
             : $"Relay chain:  #{s.RelayBest}, peerek: nem kérdezhetők le – {s.RelayPeersError}");
         Console.WriteLine(s.ParaError is null
             ? $"Parachain:    #{s.ParaBest}, véglegesítve #{s.ParaFinalized}, peerek: {s.ParaHealth!.Peers}, szinkronizál: {(s.ParaHealth.IsSyncing ? "igen" : "nem")}"

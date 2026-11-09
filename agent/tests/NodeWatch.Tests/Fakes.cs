@@ -11,6 +11,9 @@ internal sealed class FakeProbe : IProbe, IServiceStatus
     public bool RelayAdvances { get; set; } = true;
     public bool RelayDown { get; set; }
     public string? PeersError { get; set; }
+
+    /// <summary>With <see cref="PeersError"/>: the peer count from system_health (null: that fails too).</summary>
+    public int? HealthPeers { get; set; }
     public PeerCounts Peers { get; set; } = new(11, 1, 3, 7, 0);
     public long ParaFinalized { get; set; } = 500;
     public bool ParaAdvances { get; set; } = true;
@@ -34,8 +37,16 @@ internal sealed class FakeProbe : IProbe, IServiceStatus
         else
         {
             s.RelayBest = RelayBest;
-            if (PeersError is null) s.RelayPeers = Peers;
-            else s.RelayPeersError = PeersError;
+            if (PeersError is null)
+            {
+                s.RelayPeers = Peers;
+                s.RelayTotalPeers = Peers.Total;
+            }
+            else
+            {
+                s.RelayPeersError = PeersError;
+                s.RelayTotalPeers = HealthPeers;
+            }
         }
         s.ParaBest = ParaFinalized + 2;
         s.ParaFinalized = ParaFinalized;

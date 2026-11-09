@@ -140,7 +140,7 @@ internal sealed class Agent
         var s = _last;
         var facts = new Dictionary<string, object?>
         {
-            ["relayBest"] = s?.RelayBest, ["fullPeers"] = s?.RelayPeers?.SyncSources, ["totalPeers"] = s?.RelayPeers?.Total,
+            ["relayBest"] = s?.RelayBest, ["fullPeers"] = s?.RelayPeers?.SyncSources, ["totalPeers"] = s?.RelayTotalPeers,
             ["paraBest"] = s?.ParaBest, ["paraFinalized"] = s?.ParaFinalized, ["validator"] = s?.Validator?.Kind.ToString(),
             ["agentVersion"] = Program.Version,
         };

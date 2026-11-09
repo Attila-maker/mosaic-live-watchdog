@@ -6,7 +6,7 @@ Watchdog and alerting agent for [Mosaic Chain](https://github.com/Mosaic-Chain) 
 RPC ports and sends an alert when something goes wrong. It can send alerts to Telegram, Matrix, a SafeChat server or a
 relay service. When the node is stuck for 10 minutes, it restarts the chain service, at most once a day.
 
-> **Status:** first release (0.1.0). Covered by unit tests and tried against mock servers, but not yet run on a live
+> **Status:** early release (0.1.1). Covered by unit tests and tried against mock servers, but not yet run on a live
 > node for a longer time.
 > Alert texts, log messages and the Hungarian install guide are in Hungarian; the code and this README are in English.
 
@@ -22,9 +22,9 @@ relay service. When the node is stuck for 10 minutes, it restarts the chain serv
 
 | Check | Problem | Level |
 |---|---|---|
-| `relay.rpc` | The embedded relay chain node does not answer on its RPC port (default `127.0.0.1:8844`) | critical |
+| `relay.rpc` | The embedded relay chain node does not answer on its RPC port (default `127.0.0.1:9954`) | critical |
 | `relay.block_progress` | The relay chain best block has not moved for 3 minutes | critical |
-| `relay.full_peers` | No FULL or AUTHORITY peer on the relay chain (only those can be synced from) / only one / the peer list cannot be read | critical / warning / warning |
+| `relay.full_peers` | No FULL or AUTHORITY peer on the relay chain (only those can be synced from) / only one. If the relay chain RPC does not allow `system_peers` (current Mosaic nodes: `methods=safe`), only the peer count is known (`system_health`): no peer at all | critical / warning |
 | `para.rpc` | The parachain RPC (default `127.0.0.1:9944`) does not answer | critical |
 | `para.finality` | The parachain has not finalized a new block for 5 minutes | critical |
 | `para.sync` | The parachain has no peers / is still syncing after 10 minutes | critical / warning |
@@ -35,7 +35,8 @@ relay service. When the node is stuck for 10 minutes, it restarts the chain serv
 
 The `relay.full_peers` check exists because of a known stall: Mosaic nodes run the relay chain in warp-unsafe mode and
 report the `NONE` role, so the sync engine cannot sync from them. A node whose relay peers are all `NONE` stops
-following the relay chain without any error in its log.
+following the relay chain without any error in its log. Reading the roles needs `system_peers`, which current Mosaic
+nodes do not allow on the relay chain RPC; such a stall is then caught by `relay.block_progress`.
 
 A problem must be seen on two polls in a row before an alert goes out. Every alert gets a matching "resolved" message
 when the problem is gone. Critical alerts are repeated every 30 minutes while they last.
@@ -89,11 +90,11 @@ You need a release package `nodewatch-<version>.tar.gz` (from the
 On the node:
 
 ```bash
-wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.0/nodewatch-0.1.0.tar.gz
-wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.0/nodewatch-0.1.0.tar.gz.sha256
-sha256sum -c nodewatch-0.1.0.tar.gz.sha256
-tar -xzf nodewatch-0.1.0.tar.gz
-cd nodewatch-0.1.0
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.1/nodewatch-0.1.1.tar.gz
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.1/nodewatch-0.1.1.tar.gz.sha256
+sha256sum -c nodewatch-0.1.1.tar.gz.sha256
+tar -xzf nodewatch-0.1.1.tar.gz
+cd nodewatch-0.1.1
 sudo ./install.sh
 ```
 
@@ -132,7 +133,7 @@ The config file is JSON with comments: `/etc/nodewatch/appsettings.json`. The co
 |---|---|---|
 | `Node.Name` | | Name of the node in alerts |
 | `Node.ValidatorAddress` | empty | SS58 address (or `0x` public key) of the validator; empty: no validator check |
-| `Node.RelayRpc` / `Node.ParaRpc` | `http://127.0.0.1:8844` / `:9944` | Local RPC endpoints |
+| `Node.RelayRpc` / `Node.ParaRpc` | `http://127.0.0.1:9954` / `:9944` | Local RPC endpoints of the relay chain and the parachain |
 | `Node.DataPath` | `/var/lib/mosaic-mainnet` | Folder whose disk is checked |
 | `Node.Services` | chain + indexer unit | Units to watch; the first one is critical |
 | `Checks.*` | see example | Poll interval and thresholds |
@@ -257,8 +258,8 @@ nodewatch [command] [--config <file>] [--verbose]
 - It never needs the validator keys: `/opt/mosaic/secrets` is made inaccessible to the service.
 - It opens no port. It only makes outgoing HTTP calls: to the node's local RPC ports and to the configured outputs.
 - It only reads: `chain_getHeader`, `chain_getFinalizedHead`, `system_health`, `state_getStorage` and `system_peers`.
-  `system_peers` is an "unsafe" RPC method; on the local relay chain RPC it is allowed by default (`--rpc-methods auto`
-  allows unsafe methods on localhost). Without it, only the peer check is skipped (with a warning), nothing else.
+  `system_peers` is an "unsafe" RPC method: when the relay chain RPC refuses it (current Mosaic nodes run it with
+  `methods=safe`), NodeWatch takes the peer count from `system_health` and only the roles are unknown.
 - Secrets live in separate `0640 root:nodewatch` files.
 
 ## Building from source

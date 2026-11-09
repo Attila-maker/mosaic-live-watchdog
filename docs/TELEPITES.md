@@ -6,7 +6,7 @@ kell futtatni (SSH vagy PuTTY), egy `sudo` joggal rendelkező felhasználóval.
 **Előfeltételek**
 
 - Ubuntu 24.04, rajta futó Mosaic node (`mosaic-chain-mainnet.service`).
-- A node RPC portjai a szokásos helyen vannak: relay chain `127.0.0.1:8844`, parachain `127.0.0.1:9944`.
+- A node RPC portjai a mostani Mosaic beállítás szerint: relay chain `9954`, parachain `9944` (mindkettő helyben, `127.0.0.1`-en is elérhető).
 - Internetkapcsolat az apt-hoz (a .NET 10 runtime telepítéséhez) és a riasztási célhoz (pl. Telegram).
 
 ## 1. A csomag letöltése a node-ra
@@ -16,18 +16,18 @@ A kiadási csomag neve `nodewatch-<verzió>.tar.gz`. A legegyszerűbb, ha közve
 
 ```bash
 cd ~
-wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.0/nodewatch-0.1.0.tar.gz
-wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.0/nodewatch-0.1.0.tar.gz.sha256
-sha256sum -c nodewatch-0.1.0.tar.gz.sha256
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.1/nodewatch-0.1.1.tar.gz
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.1/nodewatch-0.1.1.tar.gz.sha256
+sha256sum -c nodewatch-0.1.1.tar.gz.sha256
 ```
 
-Az utolsó parancsnak `nodewatch-0.1.0.tar.gz: OK` választ kell adnia.
+Az utolsó parancsnak `nodewatch-0.1.1.tar.gz: OK` választ kell adnia.
 
 Ha a node-ról nem éred el a GitHubot, töltsd le Windowson, és másold fel például PuTTY `pscp`-vel (a `<felhasználó>` és
 a `<node-ip>` a saját adataid), WinSCP-vel vagy Total Commander SFTP-kapcsolattal:
 
 ```
-pscp nodewatch-0.1.0.tar.gz <felhasználó>@<node-ip>:
+pscp nodewatch-0.1.1.tar.gz <felhasználó>@<node-ip>:
 ```
 
 A csomagot a forrásból az `agent/build.sh` is elkészíti.
@@ -36,8 +36,8 @@ A csomagot a forrásból az `agent/build.sh` is elkészíti.
 
 ```bash
 cd ~
-tar -xzf nodewatch-0.1.0.tar.gz
-cd nodewatch-0.1.0
+tar -xzf nodewatch-0.1.1.tar.gz
+cd nodewatch-0.1.1
 sudo ./install.sh
 ```
 
@@ -117,7 +117,7 @@ Valami ilyesmit kell látnod:
 
 ```
 Node: my-mosaic-node (mosaic-mainnet)
-Relay chain:  #29481022, peerek: 8 (FULL 1, AUTHORITY 3, NONE 4, LIGHT 0)
+Relay chain:  #33802134, peerek: 8 (a szerepük nem kérdezhető le: a relay chain RPC csak biztonságos hívásokat enged)
 Parachain:    #1834567, véglegesítve #1834565, peerek: 12, szinkronizál: nem
 Validátor:    Normal
 Szolgáltatás: mosaic-chain-mainnet.service: active
@@ -128,8 +128,9 @@ Lemez:        /var/lib/mosaic-mainnet: 62.4% szabad (290.1 GB)
 
 Mire figyelj:
 
-- **Relay chain FULL + AUTHORITY:** ebből a kettőből szinkronizál a node. Ha ez 0, a relay chain megáll.
-  A `NONE` peerek (más Mosaic node-ok) ebből a szempontból nem számítanak.
+- **Relay chain peerek:** a mostani Mosaic node a relay chain RPC-n nem engedi a peerlistát (`system_peers`), ezért
+  csak a peerek száma látszik, a szerepük (FULL / NONE) nem. Ha ez 0, a relay chain megáll. Ha a peerlista
+  elérhető, a FULL + AUTHORITY peerek száma jelenik meg: ezekből szinkronizál a node.
 - **Validátor: nem található** – rossz a `ValidatorAddress`.
 - **Szolgáltatás: unknown** – a `systemctl` nem adott választ az állapotra.
 
@@ -269,7 +270,7 @@ Több kimenet is megadható egyszerre; mindegyik a saját `MinSeverity` szintje 
 | Nem jön Telegram üzenet | `sudo -u nodewatch nodewatch test-alert` kiírja a hibát. Gyakori ok: rossz token, rossz ChatId, vagy nem küldtél `/start`-ot a botnak |
 | Nem jön Matrix üzenet (`M_FORBIDDEN` vagy `M_UNKNOWN_TOKEN` a naplóban) | `M_FORBIDDEN`: a bot nincs bent a szobában – hívd meg, és futtasd újra: `sudo nodewatch matrix-login`. `M_UNKNOWN_TOKEN`: a bot munkamenetét kijelentkeztették – futtasd újra a `matrix-login` parancsot |
 | `Már fut egy NodeWatch ezzel az állapotmappával` | Kézzel indítottad a `run` parancsot, miközben a szolgáltatás is fut. Kézzel csak a `check` és a `test-alert` kell |
-| „A relay chain peerjei nem kérdezhetők le” figyelmeztetés | A relay chain RPC nem engedi a `system_peers` hívást. Helyi (127.0.0.1) kapcsolaton ez alapból engedélyezett; nézd meg, nincs-e `--rpc-methods safe` a relay chain kapcsolói között |
+| „A relay chain peerjei nem kérdezhetők le” figyelmeztetés | Sem a `system_peers`, sem a `system_health` nem válaszolt a relay chain RPC-n. Nézd meg a `Node.RelayRpc` portját: `sudo ss -ltnp \| grep mosaic` |
 | „A NodeWatch nem tudja ellenőrizni a node-ot” | Öt ellenőrzés egymás után hibával állt le; ilyenkor újraindítás sincs. A hiba oka a naplóban: `journalctl -u nodewatch -n 50` |
 | Szeretnéd, hogy 24 órán belül újra indíthasson | `sudo systemctl stop nodewatch && sudo rm /var/lib/nodewatch/state.json && sudo systemctl start nodewatch` (a nyitott riasztások állapota is törlődik) |
 

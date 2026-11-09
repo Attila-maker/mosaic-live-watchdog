@@ -8,7 +8,7 @@
     <AssemblyName>nodewatch</AssemblyName>
     <RootNamespace>NodeWatch</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <!-- Only the base class library: no NuGet package is needed to build or run it. -->
   </PropertyGroup>
 

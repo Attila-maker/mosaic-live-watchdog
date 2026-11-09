@@ -84,6 +84,10 @@ internal sealed class Snapshot
 
     /// <summary>The block number was read but the peer list was not (system_peers is an "unsafe" RPC method).</summary>
     public string? RelayPeersError { get; set; }
+
+    /// <summary>Number of relay chain peers: from system_peers, or from the safe system_health when the roles cannot be
+    /// read (Mosaic nodes run the relay chain RPC with methods=safe).</summary>
+    public int? RelayTotalPeers { get; set; }
     public long? ParaBest { get; set; }
     public long? ParaFinalized { get; set; }
     public ParaHealth? ParaHealth { get; set; }
@@ -139,10 +143,20 @@ internal sealed class NodeProbe : IProbe
             try
             {
                 s.RelayPeers = CountPeers(await _relay.CallAsync("system_peers", ct));
+                s.RelayTotalPeers = s.RelayPeers.Total;
             }
             catch (Exception e) when (!ct.IsCancellationRequested)
             {
                 s.RelayPeersError = Message(e);
+                try
+                {
+                    var health = await _relay.CallAsync("system_health", ct);
+                    s.RelayTotalPeers = health.GetProperty("peers").GetInt32();
+                }
+                catch (Exception) when (!ct.IsCancellationRequested)
+                {
+                    // Neither works: the check reports that the peers cannot be read.
+                }
             }
         }
 
