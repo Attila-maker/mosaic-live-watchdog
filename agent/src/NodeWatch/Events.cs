@@ -82,6 +82,19 @@ internal sealed class EventFactory(Config config)
             Facts = facts,
         });
 
+    /// <summary>A notice, not an alert: nothing to resolve later. <paramref name="id"/> keeps each notice apart.</summary>
+    public CloudEvent Info(string check, string id, string title, string text, DateTimeOffset now,
+        Dictionary<string, object?>? facts = null) => Make(CloudEvent.Firing, check, now, new EventData
+        {
+            AlertKey = $"{Node}/{check}/{id}",
+            Status = "firing",
+            Severity = "info",
+            Title = title,
+            Text = text,
+            StartsAt = now,
+            Facts = facts,
+        });
+
     public CloudEvent Heartbeat(DateTimeOffset now, Dictionary<string, object?> facts) =>
         Make(CloudEvent.Heartbeat, null, now, new EventData { Facts = facts });
 

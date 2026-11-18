@@ -15,6 +15,7 @@ internal sealed class Agent
     private readonly EventFactory _events;
     private readonly AlertEngine _alerts;
     private readonly RestartGuard _guard;
+    private readonly SelectionWatcher _selection;
     private Snapshot? _last;
     private DateTimeOffset? _heartbeatFailingSince;
     private bool _heartbeatWarned;
@@ -39,6 +40,7 @@ internal sealed class Agent
         _events = new EventFactory(config);
         _alerts = new AlertEngine(config, _events, _state.Alerts);
         _guard = new RestartGuard(config, _events, restarter, services, _state, store.TrySave, clock);
+        _selection = new SelectionWatcher(config, _events, _state);
         var alertsToRelay = config.Mode is "relay" or "both";
         Outbox = new Outbox(config.StateDirectory, sinks, alertsToRelay ? relay : null,
             config.Mode == "both" ? sinks : [], TimeSpan.FromMinutes(config.Relay.FallbackAfterMinutes));
@@ -48,11 +50,14 @@ internal sealed class Agent
     {
         var snapshot = await _probe.CollectAsync(now, ct);
         var results = _evaluator.Evaluate(snapshot);
+        var (selection, notices) = _selection.Process(snapshot, now);
+        results.AddRange(selection);
         _alerts.FreezeNodeChecksUntil = _state.GraceUntil ?? DateTimeOffset.MinValue;
         var output = _alerts.Process(results, now);
         output.AddRange(await _guard.EvaluateAsync(results, snapshot, now, ct));
         // A restart decided just now starts the grace period for the alerts too.
         _alerts.FreezeNodeChecksUntil = _state.GraceUntil ?? DateTimeOffset.MinValue;
+        output.AddRange(notices);
         Publish(output, now);
         _state.Alerts = _alerts.Tracks;
         _store.TrySave(_state);

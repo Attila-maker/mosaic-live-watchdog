@@ -243,6 +243,95 @@ internal static class StorageKeys
     }
 
     /// <summary>NftStaking.ValidatorStates(account): twox128(pallet) ++ twox128(item) ++ twox64(account) ++ account.</summary>
-    public static string ValidatorState(byte[] accountId) =>
-        "0x" + Convert.ToHexStringLower([.. Twox128("NftStaking"), .. Twox128("ValidatorStates"), .. Twox64Concat(accountId)]);
+    public static string ValidatorState(byte[] accountId) => Map("NftStaking", "ValidatorStates", accountId);
+
+    /// <summary>A StorageValue: twox128(pallet) ++ twox128(item).</summary>
+    public static string Value(string pallet, string item) =>
+        "0x" + Convert.ToHexStringLower([.. Twox128(pallet), .. Twox128(item)]);
+
+    /// <summary>A StorageMap with a Twox64Concat hasher.</summary>
+    public static string Map(string pallet, string item, ReadOnlySpan<byte> key) =>
+        "0x" + Convert.ToHexStringLower([.. Twox128(pallet), .. Twox128(item), .. Twox64Concat(key)]);
+
+    /// <summary>A StorageDoubleMap with Twox64Concat hashers on both keys.</summary>
+    public static string DoubleMap(string pallet, string item, ReadOnlySpan<byte> key1, ReadOnlySpan<byte> key2) =>
+        "0x" + Convert.ToHexStringLower([.. Twox128(pallet), .. Twox128(item), .. Twox64Concat(key1), .. Twox64Concat(key2)]);
+
+    public static byte[] U32(uint value)
+    {
+        var bytes = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        return bytes;
+    }
+}
+
+/// <summary>The few SCALE shapes the session data needs. Every reader throws FormatException on short or bad input.</summary>
+internal static class Scale
+{
+    public static byte[] FromHex(string? hex)
+    {
+        if (hex is null || !hex.StartsWith("0x", StringComparison.Ordinal)) throw new FormatException("hibás hex érték");
+        return Convert.FromHexString(hex.AsSpan(2));
+    }
+
+    public static ulong Compact(ReadOnlySpan<byte> data, ref int offset)
+    {
+        if (offset >= data.Length) throw new FormatException("rövid SCALE adat (compact)");
+        var first = data[offset];
+        switch (first & 0b11)
+        {
+            case 0:
+                offset += 1;
+                return (ulong)(first >> 2);
+            case 1:
+                Need(data, offset, 2);
+                var two = BinaryPrimitives.ReadUInt16LittleEndian(data[offset..]);
+                offset += 2;
+                return (ulong)(two >> 2);
+            case 2:
+                Need(data, offset, 4);
+                var four = BinaryPrimitives.ReadUInt32LittleEndian(data[offset..]);
+                offset += 4;
+                return four >> 2;
+            default:
+                var length = (first >> 2) + 4;
+                if (length > 8) throw new FormatException("túl nagy compact szám");
+                Need(data, offset, 1 + length);
+                ulong value = 0;
+                for (var i = 0; i < length; i++) value |= (ulong)data[offset + 1 + i] << (8 * i);
+                offset += 1 + length;
+                return value;
+        }
+    }
+
+    public static uint U32(ReadOnlySpan<byte> data)
+    {
+        Need(data, 0, 4);
+        return BinaryPrimitives.ReadUInt32LittleEndian(data);
+    }
+
+    public static ulong U64(ReadOnlySpan<byte> data)
+    {
+        Need(data, 0, 8);
+        return BinaryPrimitives.ReadUInt64LittleEndian(data);
+    }
+
+    /// <summary>Vec of fixed-size items (Vec&lt;AccountId32&gt;, BoundedVec&lt;AuraId&gt;, Vec&lt;(AccountId, Keys)&gt;). The value must
+    /// be exactly that long: a different item size (e.g. a runtime upgrade added a session key) is an error, not a misread.</summary>
+    public static List<byte[]> FixedVec(ReadOnlySpan<byte> data, int itemSize)
+    {
+        var offset = 0;
+        var count = Compact(data, ref offset);
+        if (count > 100_000) throw new FormatException("túl hosszú lista");
+        if (offset + (long)count * itemSize != data.Length)
+            throw new FormatException($"váratlan listahossz ({count} × {itemSize} bájt helyett {data.Length - offset} bájt)");
+        var items = new List<byte[]>((int)count);
+        for (var i = 0; i < (int)count; i++) items.Add(data.Slice(offset + i * itemSize, itemSize).ToArray());
+        return items;
+    }
+
+    private static void Need(ReadOnlySpan<byte> data, int offset, int length)
+    {
+        if (offset + length > data.Length) throw new FormatException("rövid SCALE adat");
+    }
 }

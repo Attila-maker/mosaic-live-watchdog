@@ -132,8 +132,11 @@ internal static class Program
                  $"{string.Join(", ", sinks.Select(s => s.Name).DefaultIfEmpty("-"))}" +
                  (relay is null ? "" : $", relay: {config.Relay.Url}") +
                  (config.Restart.Enabled
-                     ? $", újraindítás: {config.Restart.AfterMinutes:0.#} perc hiba után, legfeljebb {config.Restart.MinHoursBetween:0.#} óránként egyszer"
-                     : ", újraindítás: kikapcsolva"));
+                     ? $", újraindítás: {config.Restart.AfterMinutes:0.#} perc hiba után, legfeljebb {config.Restart.MinHoursBetween:0.#} óránként egyszer" +
+                       (config.Restart.MaxPerDay > 0 ? $" és naponta {Text.Times(config.Restart.MaxPerDay)}" : "")
+                     : ", újraindítás: kikapcsolva") +
+                 (config.Selection.Enabled && !string.IsNullOrWhiteSpace(config.Node.ValidatorAddress)
+                     ? ", kiválasztás figyelése: be" : ", kiválasztás figyelése: ki"));
         await agent.RunAsync(ct);
         Log.Info("NodeWatch leáll.");
         return 0;
@@ -162,10 +165,28 @@ internal static class Program
         }
         foreach (var (unit, state) in s.Services) Console.WriteLine($"Szolgáltatás: {unit}: {state}");
         Console.WriteLine(s.Disk is { } d ? $"Lemez:        {d.Path}: {d.FreePercent:0.#}% szabad ({d.FreeGb:0.#} GB)" : $"Lemez:        HIBA – {s.DiskError}");
+        if (s.Session is { } si)
+        {
+            var blockTime = TimeSpan.FromSeconds(config.Selection.SlotSeconds * 1.1);
+            var end = DateTimeOffset.UtcNow + blockTime * Math.Max(0, (long)si.SessionEnd - si.Block);
+            Console.WriteLine($"Session:      #{si.Index}, {si.Progress:P0}-nál tart, vége kb. {config.Local(end):HH:mm} " +
+                              $"(#{si.SessionEnd} blokk), {si.ActiveCount} kiválasztott validátor");
+            Console.WriteLine(si.MyIndex is { } my
+                ? $"Kiválasztva:  igen, most ({my + 1}. a sorban): eddig {si.Authored} blokk, életjel: {(si.Heartbeat ? "elküldve" : "még nincs")}"
+                : "Kiválasztva:  most nem");
+            Console.WriteLine($"Következő:    {(si.SelectedNext ? "kiválasztva a következő sessionre" : "nincs kiválasztva")} ({si.NextCount} validátor)");
+        }
+        else if (s.SessionError is not null)
+        {
+            Console.WriteLine($"Session:      HIBA – {s.SessionError}");
+        }
         var state2 = new StateStore(config.StateDirectory).Load(DateTimeOffset.UtcNow);
         if (state2.LastRestartAt is { } last)
-            Console.WriteLine($"Utolsó újraindítás: {last.ToLocalTime():yyyy-MM-dd HH:mm}" +
-                              (state2.LastRestartAssumed ? " (feltételezett: az állapotfájl nem volt olvasható)" : ""));
+            Console.WriteLine($"Utolsó újraindítás: {config.Local(last):yyyy-MM-dd HH:mm}" +
+                              (state2.LastRestartAssumed ? " (feltételezett: az állapotfájl nem volt olvasható)" : "") +
+                              $", 24 órán belül: {state2.RecentRestarts.Count(t => DateTimeOffset.UtcNow - t < TimeSpan.FromHours(24))}");
+        if (state2.Selection.LastSelectedAt is { } selected)
+            Console.WriteLine($"Utolsó kiválasztás: {config.Local(selected):yyyy-MM-dd HH:mm}");
         return s.RelayError is null && s.ParaError is null ? 0 : 1;
     }
 

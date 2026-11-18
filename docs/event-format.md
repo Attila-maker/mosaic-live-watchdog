@@ -70,8 +70,15 @@ event itself.
 ### Check names (`subject`)
 
 `relay.rpc`, `relay.block_progress`, `relay.full_peers`, `para.rpc`, `para.finality`, `para.sync`, `validator.state`,
-`host.disk`, `host.service.<unit>`, `restart` (the watchdog's own alerts), `agent` (NodeWatch cannot poll the node),
-`test` (from `nodewatch test-alert`).
+`host.disk`, `host.service.<unit>`, `validator.missed_slots`, `validator.offline_risk`, `validator.session`,
+`validator.not_selected`, `validator.session_data`, `restart` (the watchdog's own alerts), `agent` (NodeWatch cannot
+poll the node), `test` (from `nodewatch test-alert`).
+
+### Notices
+
+Some messages are notices, not alerts: `severity` is `info`, `status` is `firing`, and no `resolved` event follows.
+Their `alertKey` is unique per notice: `<node>/selection/<session index>` (selected for the next session) and
+`<node>/summary/<date>` (the daily summary).
 
 ## HTTP contract of the receivers
 

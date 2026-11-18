@@ -28,6 +28,11 @@ internal sealed class AgentState
     /// <summary>The "not restarting again" alert went out for the current outage.</summary>
     public bool RestartRefusedNotified { get; set; }
     public Dictionary<string, AlertTrack> Alerts { get; set; } = [];
+
+    /// <summary>Wall-clock times of the restarts in the last 24 hours (for Restart.MaxPerDay).</summary>
+    public List<DateTimeOffset> RecentRestarts { get; set; } = [];
+
+    public SelectionState Selection { get; set; } = new();
 }
 
 internal sealed class StateStore(string directory)

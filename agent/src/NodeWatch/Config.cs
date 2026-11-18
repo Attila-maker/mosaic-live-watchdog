@@ -9,6 +9,11 @@ internal sealed class Config
     public NodeOptions Node { get; set; } = new();
     public CheckOptions Checks { get; set; } = new();
     public RestartOptions Restart { get; set; } = new();
+    public SelectionOptions Selection { get; set; } = new();
+
+    /// <summary>Time zone of the times in the alert texts and of the daily summary (IANA name, e.g. Europe/Budapest).
+    /// Empty: the system's (the TZ variable or /etc/localtime).</summary>
+    public string TimeZone { get; set; } = "";
 
     /// <summary>direct: the agent sends to <see cref="Sinks"/>; relay: only to the relay; both: to the relay, and critical
     /// alerts the relay did not take within <see cref="RelayOptions.FallbackAfterMinutes"/> also to <see cref="Sinks"/>.</summary>
@@ -23,6 +28,11 @@ internal sealed class Config
     public bool VerboseLog { get; set; }
 
     [JsonIgnore] public string BaseDirectory { get; private set; } = "/etc/nodewatch";
+
+    [JsonIgnore] public TimeZoneInfo Zone { get; private set; } = TimeZoneInfo.Local;
+
+    /// <summary>A time as the operator reads it.</summary>
+    public DateTimeOffset Local(DateTimeOffset time) => TimeZoneInfo.ConvertTime(time, Zone);
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -54,6 +64,13 @@ internal sealed class Config
     {
         var e = new List<string>();
         if (string.IsNullOrWhiteSpace(Node.Name)) e.Add("Node.Name kötelező.");
+        ResolveZone(e);
+        if (Selection.DailySummaryHour is < -1 or > 23) e.Add("Selection.DailySummaryHour -1 (nincs) vagy 0–23 legyen.");
+        if (Selection.MissedSlotsBeforeRestart < 1) e.Add("Selection.MissedSlotsBeforeRestart legalább 1 legyen.");
+        if (Selection.OfflineRiskProgress is <= 0 or > 1) e.Add("Selection.OfflineRiskProgress 0 és 1 közötti legyen.");
+        if (Selection.SlotSeconds < 1) e.Add("Selection.SlotSeconds legalább 1 legyen.");
+        if (Selection.MissedSlotGraceSeconds < Selection.SlotSeconds)
+            e.Add("Selection.MissedSlotGraceSeconds legalább egy slot hossza legyen.");
         if (!Uri.TryCreate(Node.RelayRpc, UriKind.Absolute, out _)) e.Add("Node.RelayRpc nem érvényes URL.");
         if (!Uri.TryCreate(Node.ParaRpc, UriKind.Absolute, out _)) e.Add("Node.ParaRpc nem érvényes URL.");
         if (!string.IsNullOrWhiteSpace(Node.ValidatorAddress))
@@ -99,6 +116,9 @@ internal sealed class Config
         {
             if (Restart.AfterMinutes < 1) e.Add("Restart.AfterMinutes legalább 1 legyen.");
             if (Restart.MinHoursBetween < 1) e.Add("Restart.MinHoursBetween legalább 1 legyen.");
+            if (Restart.MaxPerDay < 0) e.Add("Restart.MaxPerDay nem lehet negatív (0: nincs napi korlát).");
+            foreach (var t in Restart.ImmediateTriggers)
+                if (!Restart.Triggers.Contains(t)) e.Add($"Restart.ImmediateTriggers: a(z) {t} nincs a Restart.Triggers között.");
             if (Restart.GraceMinutes < 0) e.Add("Restart.GraceMinutes nem lehet negatív.");
             if (string.IsNullOrWhiteSpace(Restart.Unit)) e.Add("Restart.Unit kötelező.");
             if (Restart.Command.Count == 0) e.Add("Restart.Command nem lehet üres.");
@@ -112,6 +132,19 @@ internal sealed class Config
 
     /// <summary>Reads a secret file (relative paths are relative to the config's folder). The content is trimmed.</summary>
     /// <summary>A path from the config: relative paths are relative to the config file's folder.</summary>
+    private void ResolveZone(List<string> errors)
+    {
+        if (string.IsNullOrWhiteSpace(TimeZone)) return;
+        try
+        {
+            Zone = TimeZoneInfo.FindSystemTimeZoneById(TimeZone.Trim());
+        }
+        catch (Exception e) when (e is TimeZoneNotFoundException or InvalidTimeZoneException)
+        {
+            errors.Add($"TimeZone: ismeretlen időzóna: {TimeZone} (pl. Europe/Budapest).");
+        }
+    }
+
     public string ResolvePath(string path) => Path.IsPathRooted(path) ? path : Path.Combine(BaseDirectory, path);
 
     public string ReadSecret(string path)
@@ -182,7 +215,10 @@ internal sealed class RestartOptions
     public double AfterMinutes { get; set; } = 10;
 
     /// <summary>At most one restart in this many hours (rolling window, survives agent restarts).</summary>
-    public double MinHoursBetween { get; set; } = 24;
+    public double MinHoursBetween { get; set; } = 1;
+
+    /// <summary>At most this many restarts in 24 hours; 0: no daily limit.</summary>
+    public int MaxPerDay { get; set; } = 6;
 
     /// <summary>After a restart the node needs time to catch up: no new restart decision and no new alerts from the
     /// node checks for this long.</summary>
@@ -196,10 +232,45 @@ internal sealed class RestartOptions
     public int CommandTimeoutSeconds { get; set; } = 180;
 
     public List<string> Triggers { get; set; } =
-        [CheckNames.RelayRpc, CheckNames.RelayBlocks, CheckNames.RelayFullPeers, CheckNames.ParaRpc, CheckNames.ParaFinality];
+    [
+        CheckNames.RelayRpc, CheckNames.RelayBlocks, CheckNames.RelayFullPeers, CheckNames.ParaRpc, CheckNames.ParaFinality,
+        CheckNames.MissedSlots, CheckNames.OfflineRisk,
+    ];
+
+    /// <summary>Triggers that restart at once instead of after <see cref="AfterMinutes"/>: while the node is selected,
+    /// waiting costs its slots in the session.</summary>
+    public List<string> ImmediateTriggers { get; set; } = [CheckNames.MissedSlots, CheckNames.OfflineRisk];
 
     /// <summary>No restart while any of these units is active (for example the Mosaic auto-update).</summary>
     public List<string> SkipWhileUnitsActive { get; set; } = ["update-mosaic.service"];
+}
+
+/// <summary>Watching the session selection (needs Node.ValidatorAddress).</summary>
+internal sealed class SelectionOptions
+{
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>An info message when the validator is selected for the next session.</summary>
+    public bool NotifySelected { get; set; } = true;
+
+    /// <summary>Local hour (see <see cref="Config.TimeZone"/>) of the daily summary; -1: no summary.</summary>
+    public int DailySummaryHour { get; set; } = 8;
+
+    /// <summary>Alert when a selectable (not chilled) validator has not been selected for this long; 0: off.</summary>
+    public double NotSelectedAlertHours { get; set; } = 24;
+
+    /// <summary>One missed own slot is a warning (about every tenth slot of the chain stays empty anyway); this many in a
+    /// row is critical and restarts the chain.</summary>
+    public int MissedSlotsBeforeRestart { get; set; } = 2;
+
+    /// <summary>Selected, but no block and no "I am online" heartbeat by this part of the session (the heartbeat goes out
+    /// by 80% at the latest): the chain would mark the validator offline at the end of the session.</summary>
+    public double OfflineRiskProgress { get; set; } = 0.85;
+
+    /// <summary>An own slot is judged this long after it started (the block needs time to get into the chain).</summary>
+    public int MissedSlotGraceSeconds { get; set; } = 60;
+
+    public int SlotSeconds { get; set; } = 6;
 }
 
 internal sealed class RelayOptions

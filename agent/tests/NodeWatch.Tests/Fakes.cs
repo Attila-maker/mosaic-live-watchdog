@@ -20,6 +20,8 @@ internal sealed class FakeProbe : IProbe, IServiceStatus
     public string ChainState { get; set; } = "active";
     public string UpdateState { get; set; } = "inactive";
     public string? DiskError { get; set; }
+    public ValidatorState? Validator { get; set; }
+    public SessionSim? Session { get; set; }
 
     /// <summary>When the chain unit became active, as systemd would report it (set by the polls and by restarts).</summary>
     public DateTimeOffset? ChainActiveSince { get; set; }
@@ -56,6 +58,12 @@ internal sealed class FakeProbe : IProbe, IServiceStatus
         s.Services["update-mosaic.service"] = UpdateState;
         if (DiskError is null) s.Disk = new DiskStatus("/var/lib/mosaic-mainnet", 40, 200);
         else s.DiskError = DiskError;
+        s.Validator = Validator;
+        if (Session is { } sim)
+        {
+            if (sim.Error is null) s.Session = sim.Read(now);
+            else s.SessionError = sim.Error;
+        }
         return Task.FromResult(s);
     }
 
@@ -104,11 +112,63 @@ internal sealed class MemorySink(string name, int minRank = 0) : ISink
     }
 }
 
+/// <summary>
+/// A session of the chain as the probe would read it: Aura slots follow the clock (slot = unix time / 6 s), the validator
+/// authors its own slots (index % count) when <see cref="Produce"/> is on.
+/// </summary>
+internal sealed class SessionSim
+{
+    public uint Index { get; set; } = 100;
+    public int Count { get; set; } = 10;
+    public int? MyIndex { get; set; } = 3;
+    public bool SelectedNext { get; set; }
+    public int NextCount { get; set; } = 10;
+    public bool Produce { get; set; } = true;
+    public bool Heartbeat { get; set; }
+    public uint Authored { get; set; }
+    public uint SessionLength { get; set; } = 600;
+    public DateTimeOffset StartedAt { get; set; }
+    public string? Error { get; set; }
+    private ulong? _lastSlot;
+
+    public const uint FirstBlock = 1_000_000;
+
+    public void Start(DateTimeOffset now, uint index, int? myIndex, bool selectedNext = false)
+    {
+        Index = index;
+        MyIndex = myIndex;
+        SelectedNext = selectedNext;
+        StartedAt = now;
+        Authored = 0;
+        Heartbeat = false;
+    }
+
+    public SessionInfo Read(DateTimeOffset now)
+    {
+        var slot = (ulong)now.ToUnixTimeSeconds() / 6;
+        if (_lastSlot is { } last && MyIndex is { } me && Produce)
+            for (var s = last + 1; s <= slot; s++)
+                if (s % (ulong)Count == (ulong)me) Authored++;
+        _lastSlot = slot;
+        var sessionStart = FirstBlock + Index * SessionLength;
+        var block = sessionStart + (long)((now - StartedAt).TotalSeconds / 6);
+        return new SessionInfo
+        {
+            Index = Index, ActiveCount = Count, MyIndex = MyIndex, SelectedNext = SelectedNext, NextCount = NextCount,
+            AuthorityCount = Count, Authored = MyIndex is null ? 0 : Authored, Heartbeat = Heartbeat, CurrentSlot = slot,
+            Block = block, SessionEnd = sessionStart + SessionLength - 1, SessionLength = SessionLength,
+            NextSessionEnd = sessionStart + 2 * SessionLength - 1,
+        };
+    }
+}
+
 internal static class TestConfig
 {
     public static Config Create(string stateDir, string mode = "direct") => new()
     {
         Node = new NodeOptions { Name = "testnode" },
+        // The older tests were written for one restart per 24 hours and no daily limit.
+        Restart = new RestartOptions { MinHoursBetween = 24, MaxPerDay = 0 },
         Mode = mode,
         StateDirectory = stateDir,
         Relay = mode == "direct" ? new RelayOptions() : new RelayOptions { Url = "http://relay", NodeTokenFile = "x", FallbackAfterMinutes = 2 },

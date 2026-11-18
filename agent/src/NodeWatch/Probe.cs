@@ -74,6 +74,45 @@ internal sealed record ParaHealth(int Peers, bool IsSyncing);
 
 internal sealed record DiskStatus(string Path, double FreePercent, double FreeGb);
 
+/// <summary>
+/// The validator's place in the session rotation, read from the Session, Aura, ImOnline and ValidatorSubsetSelection
+/// pallets at one block. Each session the runtime selects a subset of the validators; the selected ones take turns in the
+/// Aura slots (author of slot s = authorities[s % n], and the authorities are in the order of Session.Validators).
+/// </summary>
+internal sealed record SessionInfo
+{
+    public uint Index { get; init; }
+    public int ActiveCount { get; init; }
+
+    /// <summary>Our position in Session.Validators, which is also our Aura author index; null if not selected now.</summary>
+    public int? MyIndex { get; init; }
+
+    public bool SelectedNext { get; init; }
+    public int NextCount { get; init; }
+    public int AuthorityCount { get; init; }
+
+    /// <summary>ImOnline.AuthoredBlocks(session, us): blocks we authored in this session.</summary>
+    public uint Authored { get; init; }
+
+    /// <summary>ImOnline.ReceivedHeartbeats(session, us): our "I am online" arrived in this session.</summary>
+    public bool Heartbeat { get; init; }
+
+    /// <summary>Aura slot of the block read.</summary>
+    public ulong CurrentSlot { get; init; }
+
+    public long Block { get; init; }
+
+    /// <summary>Last block of the current session, and its length in blocks.</summary>
+    public uint SessionEnd { get; init; }
+    public uint SessionLength { get; init; }
+    public uint NextSessionEnd { get; init; }
+
+    /// <summary>0..1, how far the current session is.</summary>
+    public double Progress => SessionLength == 0
+        ? 0
+        : Math.Clamp(1.0 - (double)Math.Max(0, (long)SessionEnd - Block) / SessionLength, 0, 1);
+}
+
 /// <summary>Everything one poll saw. A null value with an error text means that part could not be read.</summary>
 internal sealed class Snapshot
 {
@@ -98,6 +137,8 @@ internal sealed class Snapshot
     public Dictionary<string, string> Services { get; } = new(StringComparer.Ordinal);
     public DiskStatus? Disk { get; set; }
     public string? DiskError { get; set; }
+    public SessionInfo? Session { get; set; }
+    public string? SessionError { get; set; }
 }
 
 internal interface IProbe
@@ -112,7 +153,15 @@ internal sealed class NodeProbe : IProbe
     private readonly JsonRpc _relay;
     private readonly JsonRpc _para;
     private readonly string? _validatorKey;
+    private readonly byte[]? _account;
     private readonly IServiceStatus _services;
+    private SessionSet? _sets;
+
+    /// <summary>The validator lists of one session: they only change when the session changes.</summary>
+    private sealed record SessionSet(uint Index, int? MyIndex, int ActiveCount, bool SelectedNext, int NextCount, int AuthorityCount);
+
+    /// <summary>Session keys of the Mosaic runtime: aura (sr25519) + im_online (sr25519).</summary>
+    internal const int SessionKeysSize = 64;
 
     public NodeProbe(Config config, HttpClient http, IServiceStatus services)
     {
@@ -121,7 +170,10 @@ internal sealed class NodeProbe : IProbe
         _para = new JsonRpc(http, config.Node.ParaRpc);
         _services = services;
         if (!string.IsNullOrWhiteSpace(config.Node.ValidatorAddress))
-            _validatorKey = StorageKeys.ValidatorState(Ss58.DecodePublicKey(config.Node.ValidatorAddress));
+        {
+            _account = Ss58.DecodePublicKey(config.Node.ValidatorAddress);
+            _validatorKey = StorageKeys.ValidatorState(_account);
+        }
     }
 
     public async Task<Snapshot> CollectAsync(DateTimeOffset now, CancellationToken ct)
@@ -190,6 +242,18 @@ internal sealed class NodeProbe : IProbe
             }
         }
 
+        if (_account is not null && _config.Selection.Enabled && s.ParaError is null)
+        {
+            try
+            {
+                s.Session = await ReadSessionAsync(_account, ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                s.SessionError = Message(e);
+            }
+        }
+
         var units = _config.Node.Services.Concat(_config.Restart.SkipWhileUnitsActive).Append(_config.Restart.Unit).Distinct();
         foreach (var unit in units) s.Services[unit] = await _services.StateAsync(unit, ct);
 
@@ -211,6 +275,55 @@ internal sealed class NodeProbe : IProbe
     }
 
     private static string Message(Exception e) => e is RpcException ? e.Message : $"{e.GetType().Name}: {e.Message}";
+
+    /// <summary>All values from the same block, so a session change between two reads cannot mix two sessions.</summary>
+    private async Task<SessionInfo> ReadSessionAsync(byte[] account, CancellationToken ct)
+    {
+        var hashValue = await _para.CallAsync("chain_getBlockHash", ct);
+        if (hashValue.ValueKind != JsonValueKind.String) throw new RpcException("chain_getBlockHash: hibás válasz");
+        var hash = hashValue.GetString()!;
+        var header = await _para.CallAsync("chain_getHeader", ct, hash);
+
+        async Task<byte[]?> Read(string key)
+        {
+            var value = await _para.CallAsync("state_getStorage", ct, key, hash);
+            return value.ValueKind == JsonValueKind.Null ? null : Scale.FromHex(value.GetString());
+        }
+
+        async Task<byte[]> Need(string pallet, string item) =>
+            await Read(StorageKeys.Value(pallet, item)) ?? throw new RpcException($"{pallet}.{item} nem található");
+
+        var index = Scale.U32(await Need("Session", "CurrentIndex"));
+        if (_sets is null || _sets.Index != index)
+        {
+            var validators = Scale.FixedVec(await Need("Session", "Validators"), 32);
+            var queued = Scale.FixedVec(await Need("Session", "QueuedKeys"), 32 + SessionKeysSize);
+            var authorities = Scale.FixedVec(await Need("Aura", "Authorities"), 32);
+            var mine = validators.FindIndex(v => v.AsSpan().SequenceEqual(account));
+            _sets = new SessionSet(index, mine < 0 ? null : mine, validators.Count,
+                queued.Any(q => q.AsSpan(0, 32).SequenceEqual(account)), queued.Count, authorities.Count);
+        }
+
+        var sessionKey = StorageKeys.U32(index);
+        var authored = await Read(StorageKeys.DoubleMap("ImOnline", "AuthoredBlocks", sessionKey, account));
+        var heartbeat = await Read(StorageKeys.DoubleMap("ImOnline", "ReceivedHeartbeats", sessionKey, account));
+        return new SessionInfo
+        {
+            Index = index,
+            ActiveCount = _sets.ActiveCount,
+            MyIndex = _sets.MyIndex,
+            SelectedNext = _sets.SelectedNext,
+            NextCount = _sets.NextCount,
+            AuthorityCount = _sets.AuthorityCount,
+            Authored = authored is null ? 0 : Scale.U32(authored),
+            Heartbeat = heartbeat is { Length: > 0 } && heartbeat[0] != 0,
+            CurrentSlot = Scale.U64(await Need("Aura", "CurrentSlot")),
+            Block = JsonRpc.ParseNumber(header),
+            SessionEnd = Scale.U32(await Need("ValidatorSubsetSelection", "CurrentSessionEnd")),
+            SessionLength = Scale.U32(await Need("ValidatorSubsetSelection", "CurrentSessionLength")),
+            NextSessionEnd = Scale.U32(await Need("ValidatorSubsetSelection", "NextSessionEnd")),
+        };
+    }
 
     internal static PeerCounts CountPeers(JsonElement peers)
     {

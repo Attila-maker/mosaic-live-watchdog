@@ -91,21 +91,39 @@ internal sealed class RestartGuard(Config config, EventFactory events, IRestarte
         var failingSince = failing.Min(r => r.Since ?? now);
         var since = failingSince > _judgeableSince.Value ? failingSince : _judgeableSince.Value;
         var down = now - since;
-        if (down < TimeSpan.FromMinutes(o.AfterMinutes)) return output;
+        // A selected node that does not work loses its slots in the session: no waiting for those triggers.
+        var immediate = failing.Any(r => o.ImmediateTriggers.Contains(r.Name));
+        if (!immediate && down < TimeSpan.FromMinutes(o.AfterMinutes)) return output;
 
         var reasons = string.Join("; ", failing.Select(r => r.Title));
         var outage = now - failingSince;
 
-        if (state.LastRestartAt is { } lastRestart && SinceLastRestart(now, lastRestart) < TimeSpan.FromHours(o.MinHoursBetween))
+        var recent = state.RecentRestarts.Count(t => now - t < TimeSpan.FromHours(24));
+        var tooSoon = state.LastRestartAt is { } lastRestart &&
+                      SinceLastRestart(now, lastRestart) < TimeSpan.FromHours(o.MinHoursBetween);
+        var dailyLimit = o.MaxPerDay > 0 && recent >= o.MaxPerDay;
+        if (tooSoon || dailyLimit)
         {
+            var nextAllowed = NextAllowed(now);
+            if (nextAllowed - now <= TimeSpan.FromHours(2) && !dailyLimit)
+            {
+                // Soon allowed again (hourly limit): the open alert stays, no "manual action needed" message.
+                Wait($"legközelebb {config.Local(nextAllowed):HH:mm}-kor indíthatok újra");
+                return output;
+            }
             if (!state.RestartRefusedNotified)
             {
-                var why = state.LastRestartAssumed
-                    ? $"az állapotfájl {lastRestart.ToLocalTime():MM.dd. HH:mm}-kor nem volt olvasható, ezért biztonsági okból"
-                    : $"{lastRestart.ToLocalTime():MM.dd. HH:mm}-kor már volt újraindítás, és";
+                var previousAt = state.LastRestartAt ?? now;
+                var why = dailyLimit
+                    ? $"24 órán belül már {recent} újraindítás volt, és naponta legfeljebb {Text.Times(o.MaxPerDay)} indítok újra " +
+                      $"(legközelebb {config.Local(nextAllowed):MM.dd. HH:mm}-kor)."
+                    : state.LastRestartAssumed
+                        ? $"az állapotfájl {config.Local(previousAt):MM.dd. HH:mm}-kor nem volt olvasható, ezért biztonsági okból " +
+                          $"{o.MinHoursBetween:0.#} órán belül nem indítok újra."
+                        : $"{config.Local(previousAt):MM.dd. HH:mm}-kor már volt újraindítás, és {o.MinHoursBetween:0.#} órán " +
+                          "belül csak egyszer indítok újra.";
                 output.Add(events.Firing(Key, Level.Critical, "Nem indítom újra a node-ot",
-                    $"{reasons}. {Text.Duration(outage)} nem működik, de {why} {o.MinHoursBetween:0.#} órán belül csak " +
-                    "egyszer indítok újra. Kézi beavatkozás kell.", failingSince, now));
+                    $"{reasons}. {Text.Duration(outage)} nem működik, de {why} Kézi beavatkozás kell.", failingSince, now));
                 state.RestartAlertOpen = true;
                 state.RestartAlertSince ??= failingSince;
                 state.RestartRefusedNotified = true;
@@ -133,6 +151,9 @@ internal sealed class RestartGuard(Config config, EventFactory events, IRestarte
         // still counts, so it can never cause a second restart within the limit.
         var previous = (state.LastRestartAt, state.LastRestartAssumed, state.LastRestartBootId, state.LastRestartUptime,
             state.GraceUntil);
+        var previousRecent = state.RecentRestarts.ToList();
+        state.RecentRestarts.RemoveAll(t => now - t >= TimeSpan.FromHours(24));
+        state.RecentRestarts.Add(now);
         var boot = clock.Now();
         state.LastRestartAt = now;
         state.LastRestartAssumed = false;
@@ -143,6 +164,7 @@ internal sealed class RestartGuard(Config config, EventFactory events, IRestarte
         {
             (state.LastRestartAt, state.LastRestartAssumed, state.LastRestartBootId, state.LastRestartUptime,
                 state.GraceUntil) = previous;
+            state.RecentRestarts = previousRecent;
             if (!_saveFailedNotified)
             {
                 output.Add(events.Firing(Key, Level.Critical, "Nem indítom újra a node-ot",
@@ -160,9 +182,10 @@ internal sealed class RestartGuard(Config config, EventFactory events, IRestarte
         state.RestartRefusedNotified = false;
         _judgeableSince = null;
         Log.Warn($"Újraindítás: {string.Join(' ', o.Command)} ({reasons}, {Text.Length(outage)})");
+        var left = o.MaxPerDay > 0 ? $" 24 órán belül még {Math.Max(0, o.MaxPerDay - state.RecentRestarts.Count)} lehet." : "";
         output.Add(events.Firing(Key, Level.Critical, "Újraindítom a Mosaic node-ot",
             $"{reasons}. {Text.Duration(outage)} nem működik. A következő automatikus újraindítás legkorábban " +
-            $"{(now + TimeSpan.FromHours(o.MinHoursBetween)).ToLocalTime():MM.dd. HH:mm}-kor lehet.", failingSince, now));
+            $"{config.Local(now + TimeSpan.FromHours(o.MinHoursBetween)):MM.dd. HH:mm}-kor lehet.{left}", failingSince, now));
 
         var error = await restarter.RestartAsync(ct);
         if (error is null)
@@ -194,10 +217,28 @@ internal sealed class RestartGuard(Config config, EventFactory events, IRestarte
         return wall;
     }
 
+    /// <summary>The earliest time both limits allow a restart again.</summary>
+    private DateTimeOffset NextAllowed(DateTimeOffset now)
+    {
+        var o = config.Restart;
+        var next = now;
+        if (state.LastRestartAt is { } last && last + TimeSpan.FromHours(o.MinHoursBetween) > next)
+            next = last + TimeSpan.FromHours(o.MinHoursBetween);
+        var recent = state.RecentRestarts.Where(t => now - t < TimeSpan.FromHours(24)).Order().ToList();
+        if (o.MaxPerDay > 0 && recent.Count >= o.MaxPerDay)
+        {
+            var freed = recent[recent.Count - o.MaxPerDay] + TimeSpan.FromHours(24);
+            if (freed > next) next = freed;
+        }
+        return next;
+    }
+
     /// <summary>After the clock was set back, stored times may lie in the future; they must not block for longer than meant.</summary>
     private void ClampFutureTimes(DateTimeOffset now)
     {
         if (state.LastRestartAt > now) state.LastRestartAt = now;
+        for (var i = 0; i < state.RecentRestarts.Count; i++)
+            if (state.RecentRestarts[i] > now) state.RecentRestarts[i] = now;
         var maxGrace = now + TimeSpan.FromMinutes(config.Restart.GraceMinutes);
         if (state.GraceUntil > maxGrace) state.GraceUntil = maxGrace;
     }

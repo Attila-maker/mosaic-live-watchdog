@@ -16,18 +16,18 @@ A kiadási csomag neve `nodewatch-<verzió>.tar.gz`. A legegyszerűbb, ha közve
 
 ```bash
 cd ~
-wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.1/nodewatch-0.1.1.tar.gz
-wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.1/nodewatch-0.1.1.tar.gz.sha256
-sha256sum -c nodewatch-0.1.1.tar.gz.sha256
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.2.0/nodewatch-0.2.0.tar.gz
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.2.0/nodewatch-0.2.0.tar.gz.sha256
+sha256sum -c nodewatch-0.2.0.tar.gz.sha256
 ```
 
-Az utolsó parancsnak `nodewatch-0.1.1.tar.gz: OK` választ kell adnia.
+Az utolsó parancsnak `nodewatch-0.2.0.tar.gz: OK` választ kell adnia.
 
 Ha a node-ról nem éred el a GitHubot, töltsd le Windowson, és másold fel például PuTTY `pscp`-vel (a `<felhasználó>` és
 a `<node-ip>` a saját adataid), WinSCP-vel vagy Total Commander SFTP-kapcsolattal:
 
 ```
-pscp nodewatch-0.1.1.tar.gz <felhasználó>@<node-ip>:
+pscp nodewatch-0.2.0.tar.gz <felhasználó>@<node-ip>:
 ```
 
 A csomagot a forrásból az `agent/build.sh` is elkészíti.
@@ -36,8 +36,8 @@ A csomagot a forrásból az `agent/build.sh` is elkészíti.
 
 ```bash
 cd ~
-tar -xzf nodewatch-0.1.1.tar.gz
-cd nodewatch-0.1.1
+tar -xzf nodewatch-0.2.0.tar.gz
+cd nodewatch-0.2.0
 sudo ./install.sh
 ```
 
@@ -96,7 +96,8 @@ A fájl megjegyzésekkel van ellátva. A legfontosabbak:
 | `Node.Name` | A node neve, ahogy a riasztásokban látni szeretnéd |
 | `Node.ValidatorAddress` | A validátor fiók SS58 címe. Üresen hagyva nincs validátorállapot-figyelés (Chilled / Faulted) |
 | `Sinks` → `ChatId` | Az előző lépésben kapott szám (idézőjelek között) |
-| `Sinks` → `MinSeverity` | `warning`: figyelmeztetés és kritikus; `critical`: csak a kritikus riasztások |
+| `Sinks` → `MinSeverity` | `info`: a kiválasztási értesítések és a napi összesítés is; `warning`: figyelmeztetés és kritikus; `critical`: csak a kritikus riasztások |
+| `TimeZone` | Az üzenetekben szereplő időpontok időzónája, magyar időhöz `Europe/Budapest` (üresen a node-é, ami UTC) |
 
 A többi érték alapból jó a mainnet node-hoz. Az újraindítási szabályok a `Restart` részben vannak:
 
@@ -104,7 +105,8 @@ A többi érték alapból jó a mainnet node-hoz. Az újraindítási szabályok 
 |---|---|---|
 | `Enabled` | `true` | Az automatikus újraindítás be van-e kapcsolva |
 | `AfterMinutes` | `10` | Ennyi perc folyamatos hiba után indít újra |
-| `MinHoursBetween` | `24` | Ennyi órán belül legfeljebb egyszer indít újra |
+| `MinHoursBetween` | `1` | Ennyi órán belül legfeljebb egyszer indít újra |
+| `MaxPerDay` | `6` | 24 órán belül legfeljebb ennyiszer indít újra (0: nincs napi korlát) |
 | `GraceMinutes` | `15` | Újraindítás után ennyi ideig hagyja a node-ot utolérni a láncot |
 
 ## 5. Ellenőrzés
@@ -162,11 +164,14 @@ A szolgáltatás a gép újraindítása után magától elindul.
    - kiadja a `systemctl --no-block restart mosaic-chain-mainnet.service` parancsot,
    - 15 percig vár, hogy a node utolérje a láncot.
 3. Ha a node rendbe jön, „helyreállt” üzenet jön.
-4. Ha 24 órán belül újra elakad, **nem** indítja újra, hanem egyszer szól: „Nem indítom újra a node-ot … Kézi
+4. Óránként legfeljebb egyszer és 24 órán belül legfeljebb hatszor indít újra (`MinHoursBetween`, `MaxPerDay`). Az
+   órás korláton belül csendben vár; ha a napi korlát betelt, egyszer szól: „Nem indítom újra a node-ot … Kézi
    beavatkozás kell.”
 
 Újraindítást kiváltó hibák: a relay chain RPC nem válaszol, a relay chain nem halad, nincs full peer, a parachain RPC
-nem válaszol, a parachain nem véglegesít.
+nem válaszol, a parachain nem véglegesít. Kiválasztott sessionben ezen felül **azonnal** (10 perc várakozás nélkül):
+két saját blokkhely egymás után üresen maradt, vagy a session 85%-ánál még sem blokk, sem életjel nem volt (lásd
+lent).
 
 Újraindítás előtt a NodeWatch nem chillel: ilyenkor a node már legalább 10 perce nem végzi a dolgát, az újraindítás
 csak rövidíti a kiesést.
@@ -184,6 +189,31 @@ Az utolsó újraindítás idejét a `/var/lib/nodewatch/state.json` őrzi, és m
 a NodeWatch vagy a gép újraindítása nem nullázza a napi korlátot. Ha az állapotfájl nem menthető, nincs újraindítás;
 ha nem olvasható, a NodeWatch úgy veszi, hogy épp most volt egy. A `check` parancs ki is írja („Utolsó
 újraindítás: …”).
+
+## A kiválasztás figyelése
+
+A Mosaic nem minden validátort használ minden sessionben. Kb. óránként (legalább 45 percenként) a lánc kiválaszt egy
+részhalmazt (jelenleg 200 validátort) a nem chillelt validátorok közül, úgy, hogy egy hét alatt mindenki nagyjából
+egyformán sorra kerüljön. A kiválasztottak felváltva gyártják a blokkokat a 6 másodperces slotokban. A kiválasztott
+validátornak a session alatt legalább egy blokkot kell gyártania, vagy „életjelet” (heartbeat) kell küldenie, különben a
+session végén offline-nak jelöli a lánc (`Faulted`, büntetés lehet).
+
+Ha a `ValidatorAddress` meg van adva, a NodeWatch ezt is figyeli:
+
+| Mit | Üzenet |
+|---|---|
+| A következő sessionre kiválasztották | info: „Kiválasztottak a következő sessionre”, a várható időponttal |
+| Egy saját blokkhely üresen maradt | figyelmeztetés (a láncon kb. minden tizedik slot üres marad, ez önmagában nem hiba) |
+| Két saját blokkhely egymás után üres | kritikus + **azonnali újraindítás** |
+| A session 85%-ánál még nincs blokk és életjel sem | kritikus + **azonnali újraindítás** (így még a session vége előtt elküldheti az életjelet) |
+| Az előző kiválasztott session offline-nal zárult | figyelmeztetés |
+| 24 órája nem választották ki, pedig választható | figyelmeztetés |
+| Napi összesítés (alapból reggel 8-kor) | info: hányszor választották ki, blokkok, kihagyott helyek, újraindítások |
+
+Az info üzenetekhez a kimenet `MinSeverity` értéke `info` legyen. Az időpontok a `TimeZone` beállítás szerint
+jelennek meg, ez magyar időhöz `Europe/Budapest`.
+
+A `check` parancs is kiírja az aktuális sessiont, és hogy most vagy a következő sessionre ki van-e választva a node.
 
 ## Frissítés
 

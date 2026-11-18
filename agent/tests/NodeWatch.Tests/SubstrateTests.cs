@@ -106,4 +106,48 @@ internal static class SubstrateTests
         Assert.Equal(2, p.Authority, "authority");
         Assert.Equal(3, p.SyncSources, "sync sources");
     }
+
+    [Test]
+    public static void Hungarian_times_suffix()
+    {
+        string[] expected = ["1-szer", "2-szer", "3-szor", "4-szer", "5-ször", "6-szor", "7-szer", "8-szor", "9-szer", "10-szer",
+            "20-szor", "24-szer", "30-szor", "100-szor", "1000-szer"];
+        int[] numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 24, 30, 100, 1000];
+        Assert.Equal(string.Join(",", expected), string.Join(",", numbers.Select(Text.Times)), "suffixes");
+    }
+
+    [Test]
+    public static void Scale_compact_and_fixed_vectors()
+    {
+        int o = 0;
+        Assert.Equal(0UL, Scale.Compact([0x00], ref o), "single 0");
+        o = 0; Assert.Equal(63UL, Scale.Compact([0xfc], ref o), "single 63");
+        o = 0; Assert.Equal(64UL, Scale.Compact([0x01, 0x01], ref o), "two-byte 64");
+        o = 0; Assert.Equal(16383UL, Scale.Compact([0xfd, 0xff], ref o), "two-byte max");
+        o = 0; Assert.Equal(16384UL, Scale.Compact([0x02, 0x00, 0x01, 0x00], ref o), "four-byte");
+        o = 0; Assert.Equal(1073741824UL, Scale.Compact([0x03, 0x00, 0x00, 0x00, 0x40], ref o), "big-int mode");
+        Assert.Equal(5, o, "offset after big-int: the mode byte and four data bytes");
+        var vec = Scale.FixedVec([0x08, 1, 1, 2, 2], 2);
+        Assert.Equal(2, vec.Count, "two items");
+        Assert.Equal("0202", Convert.ToHexStringLower(vec[1]), "second item");
+        var threw = false;
+        try { Scale.FixedVec([0x08, 1, 1, 2, 2, 3], 2); }
+        catch (FormatException) { threw = true; }
+        Assert.True(threw, "a longer value (other item size) is refused");
+    }
+
+    [Test]
+    public static void Session_storage_keys()
+    {
+        Assert.Equal("0xcec5070d609dd3497f72bde07fc96ba088dcde934c658227ee1dfafcd6e16903", StorageKeys.Value("Session", "Validators"),
+            "Session.Validators (same as on Polkadot)");
+        Assert.Equal("0x57f8dc2f5ab09467896f47300f04243806155b3cd9a8c9e5e9a23fd5dc13a5ed", StorageKeys.Value("Aura", "CurrentSlot"),
+            "Aura.CurrentSlot");
+        var account = Convert.FromHexString(AlicePub);
+        var key = StorageKeys.DoubleMap("ImOnline", "AuthoredBlocks", StorageKeys.U32(7), account);
+        Assert.True(key.StartsWith("0x2b06af9719ac64d755623cda8ddd9b94b1c371ded9e9c565e89ba783c4d5f5f9"), "prefix");
+        Assert.Equal("07000000", key.Substring(2 + 64 + 16, 8), "the session index after its twox64 hash");
+        Assert.True(key.EndsWith(AlicePub), "the account at the end");
+        Assert.Equal(2 + 64 + (16 + 8) + (16 + 64), key.Length, "length: prefix + twox64concat(u32) + twox64concat(account)");
+    }
 }

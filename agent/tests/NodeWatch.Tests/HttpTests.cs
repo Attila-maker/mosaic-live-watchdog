@@ -240,6 +240,68 @@ internal static class HttpTests
     }
 
     [Test]
+    public static async Task NodeProbe_reads_the_session_rotation_at_one_block()
+    {
+        const string alice = "15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5";
+        var me = Ss58.DecodePublicKey(alice);
+        byte[] Other(byte b) => Enumerable.Repeat(b, 32).ToArray();
+        string Hex(params byte[][] parts) => "0x" + Convert.ToHexStringLower(parts.SelectMany(x => x).ToArray());
+        var keys = new byte[NodeProbe.SessionKeysSize];
+        var slot = BitConverter.GetBytes(294_000_123UL);
+        var storage = new Dictionary<string, string>
+        {
+            [StorageKeys.ValidatorState(me)] = "0x00",
+            [StorageKeys.Value("Session", "CurrentIndex")] = "0x07000000",
+            [StorageKeys.Value("Session", "Validators")] = Hex([0x0c], Other(0x11), me, Other(0x22)),
+            [StorageKeys.Value("Session", "QueuedKeys")] = Hex([0x08], Other(0x33), keys, me, keys),
+            [StorageKeys.Value("Aura", "Authorities")] = Hex([0x0c], Other(0x44), Other(0x55), Other(0x66)),
+            [StorageKeys.Value("Aura", "CurrentSlot")] = Hex(slot),
+            [StorageKeys.DoubleMap("ImOnline", "AuthoredBlocks", StorageKeys.U32(7), me)] = "0x02000000",
+            [StorageKeys.DoubleMap("ImOnline", "ReceivedHeartbeats", StorageKeys.U32(7), me)] = "0x01",
+            [StorageKeys.Value("ValidatorSubsetSelection", "CurrentSessionEnd")] = "0x88130000", // 5000
+            [StorageKeys.Value("ValidatorSubsetSelection", "CurrentSessionLength")] = "0x58020000", // 600
+            [StorageKeys.Value("ValidatorSubsetSelection", "NextSessionEnd")] = "0xe0150000", // 5600
+        };
+        var atHash = new List<bool>();
+        await using var para = new FakeServer((_, body) => (200, RpcResult(body, (m, p) =>
+        {
+            switch (m)
+            {
+                case "chain_getBlockHash": return "0xbe57";
+                case "chain_getFinalizedHead": return "0xf1";
+                case "system_health": return new { peers = 8, isSyncing = false };
+                case "chain_getHeader": return new { number = p.GetArrayLength() > 0 && p[0].GetString() == "0xbe57" ? "0x1194" : "0x1195" };
+                case "state_getStorage":
+                    var key = p[0].GetString()!;
+                    if (key != StorageKeys.ValidatorState(me)) atHash.Add(p.GetArrayLength() == 2 && p[1].GetString() == "0xbe57");
+                    return storage.GetValueOrDefault(key);
+                default: return null;
+            }
+        })));
+        await using var relay = new FakeServer((_, body) => (200, RpcResult(body, (_, _) => new { number = "0x10" })));
+        var config = TestConfig.Create(TestConfig.TempDir());
+        config.Node.ValidatorAddress = alice;
+        config.Node.RelayRpc = relay.Url;
+        config.Node.ParaRpc = para.Url;
+        using var http = new HttpClient();
+        var s = await new NodeProbe(config, http, new FixedServices()).CollectAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+        Assert.Equal(null, s.SessionError, "no error");
+        var info = s.Session!;
+        Assert.Equal(7u, info.Index, "session index");
+        Assert.Equal(1, info.MyIndex, "our place = aura author index");
+        Assert.Equal(3, info.ActiveCount, "selected now");
+        Assert.True(info.SelectedNext, "selected for the next session");
+        Assert.Equal(2, info.NextCount, "next count");
+        Assert.Equal(3, info.AuthorityCount, "aura authorities");
+        Assert.Equal(2u, info.Authored, "authored blocks");
+        Assert.True(info.Heartbeat, "heartbeat");
+        Assert.Equal(294_000_123UL, info.CurrentSlot, "slot");
+        Assert.Equal(4500L, info.Block, "block of the hash");
+        Assert.True(Math.Abs(info.Progress - (1 - 500.0 / 600)) < 1e-9, "progress");
+        Assert.True(atHash.Count >= 8 && atHash.All(x => x), "every session read at the same block hash");
+    }
+
+    [Test]
     public static async Task NodeProbe_survives_strange_answers()
     {
         // Relay: header is null (broken database); para: an error without a message, then a non-object body.
@@ -338,7 +400,11 @@ internal static class HttpTests
         var config = Config.Load(path);
         Assert.Equal("direct", config.Mode, "mode");
         Assert.Equal(10.0, config.Restart.AfterMinutes, "restart after");
-        Assert.Equal(24.0, config.Restart.MinHoursBetween, "once a day");
+        Assert.Equal(1.0, config.Restart.MinHoursBetween, "at most hourly");
+        Assert.Equal(6, config.Restart.MaxPerDay, "six a day");
+        Assert.Equal("Europe/Budapest", config.Zone.Id, "time zone");
+        Assert.True(config.Restart.ImmediateTriggers.All(config.Restart.Triggers.Contains), "immediate triggers are triggers");
+        Assert.Equal(2, config.Selection.MissedSlotsBeforeRestart, "two missed slots");
     }
 
     private sealed class FixedServices : IServiceStatus

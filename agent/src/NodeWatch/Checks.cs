@@ -37,8 +37,26 @@ internal static class CheckNames
     public const string Disk = "host.disk";
     public const string ServicePrefix = "host.service.";
 
+    /// <summary>Selected, and its own slots in a row stayed without a block.</summary>
+    public const string MissedSlots = "validator.missed_slots";
+
+    /// <summary>Selected, late in the session, and no block and no heartbeat yet: it would be marked offline.</summary>
+    public const string OfflineRisk = "validator.offline_risk";
+
+    /// <summary>The last selected session ended without a block and without a heartbeat.</summary>
+    public const string SessionResult = "validator.session";
+
+    /// <summary>Not selected for a long time although it could be.</summary>
+    public const string NotSelected = "validator.not_selected";
+
+    /// <summary>The session data cannot be read (RPC or runtime change).</summary>
+    public const string SessionData = "validator.session_data";
+
     public static readonly HashSet<string> All =
-        [RelayRpc, RelayBlocks, RelayFullPeers, ParaRpc, ParaFinality, ParaSync, Validator, Disk];
+    [
+        RelayRpc, RelayBlocks, RelayFullPeers, ParaRpc, ParaFinality, ParaSync, Validator, Disk,
+        MissedSlots, OfflineRisk, SessionResult, NotSelected, SessionData,
+    ];
 
     /// <summary>Checks that a node restart disturbs: frozen during the grace period after a restart.</summary>
     public static bool IsNodeCheck(string name) => name != Disk;
@@ -290,6 +308,20 @@ internal sealed class CheckEvaluator(Config config)
 
 internal static class Text
 {
+    /// <summary>"3-szor", "5-ször", "6-szor", "2-szer": the Hungarian "times" suffix follows how the number is said.</summary>
+    public static string Times(int n)
+    {
+        var a = Math.Abs(n);
+        string suffix;
+        if (a % 10 != 0)
+            suffix = (a % 10) switch { 3 or 6 or 8 => "szor", 5 => "ször", _ => "szer" };
+        else if (a % 100 != 0)
+            suffix = (a % 100 / 10) switch { 2 or 3 or 6 or 8 => "szor", _ => "szer" };
+        else
+            suffix = a % 1000 != 0 ? "szor" : "szer";
+        return $"{n}-{suffix}";
+    }
+
     public static string Duration(TimeSpan span)
     {
         if (span < TimeSpan.Zero) span = TimeSpan.Zero;

@@ -6,7 +6,7 @@ Watchdog and alerting agent for [Mosaic Chain](https://github.com/Mosaic-Chain) 
 RPC ports and sends an alert when something goes wrong. It can send alerts to Telegram, Matrix, a SafeChat server or a
 relay service. When the node is stuck for 10 minutes, it restarts the chain service, at most once a day.
 
-> **Status:** early release (0.1.1). Covered by unit tests and tried against mock servers, but not yet run on a live
+> **Status:** early release (0.2.0). Covered by unit tests and tried against mock servers, but not yet run on a live
 > node for a longer time.
 > Alert texts, log messages and the Hungarian install guide are in Hungarian; the code and this README are in English.
 
@@ -32,6 +32,11 @@ relay service. When the node is stuck for 10 minutes, it restarts the chain serv
 | `host.service.<unit>` | A watched systemd unit is not running (the first one, the chain, is critical) | critical / warning |
 | `host.disk` | Free space on the node's data disk is low (15% / 5%), or it cannot be read | warning / critical |
 | `agent` | NodeWatch itself failed 5 polls in a row, so it cannot watch (or restart) the node | critical |
+| `validator.missed_slots` | Selected for the session, but its own block slot stayed empty / two in a row | warning / critical |
+| `validator.offline_risk` | Selected, 85% of the session is over, and still no block and no "I am online" heartbeat | critical |
+| `validator.session` | The last selected session ended with no block and no heartbeat (the chain marks it offline) | warning |
+| `validator.not_selected` | Not selected for 24 hours although it is selectable (not chilled) | warning |
+| `validator.session_data` | The session data cannot be read (the selection watching pauses) | warning |
 
 The `relay.full_peers` check exists because of a known stall: Mosaic nodes run the relay chain in warp-unsafe mode and
 report the `NONE` role, so the sync engine cannot sync from them. A node whose relay peers are all `NONE` stops
@@ -46,16 +51,17 @@ when the problem is gone. Critical alerts are repeated every 30 minutes while th
 When one of these checks is critical for **10 minutes without a break** —
 `relay.rpc`, `relay.block_progress`, `relay.full_peers`, `para.rpc`, `para.finality` —
 NodeWatch restarts the chain service (`systemctl --no-block restart mosaic-chain-mainnet.service`) and sends an alert
-about it.
+about it. While the validator is selected for the session, `validator.missed_slots` and `validator.offline_risk`
+restart it **at once**, because waiting would cost the rest of its slots in the session.
 
 Safety rules:
 
-- **At most one restart in 24 hours.** The time of the restart is written to disk (with fsync) *before* the command runs,
-  so a hanging or failing restart, a crash or a reboot can never lead to a second one. Within the same boot the 24 hours
-  are also measured on the time since boot, so a wall-clock jump (for example a wrong RTC corrected by NTP) cannot
-  shorten it. If the time cannot be saved,
-  there is no restart. If the state file is unreadable, NodeWatch assumes a restart just happened. If the node fails
-  again within 24 hours, NodeWatch sends one "manual action needed" alert instead of restarting again.
+- **At most one restart per hour and six in 24 hours** (`MinHoursBetween`, `MaxPerDay`). The time of the restart is
+  written to disk (with fsync) *before* the command runs, so a hanging or failing restart, a crash or a reboot can never
+  lead to an extra one. Within the same boot the limit is also measured on the time since boot, so a wall-clock jump
+  (for example a wrong RTC corrected by NTP) cannot shorten it. If the time cannot be saved, there is no restart. If
+  the state file is unreadable, NodeWatch assumes a restart just happened. Under the hourly limit it waits quietly; when
+  the daily limit is reached, it sends one "manual action needed" alert instead of restarting again.
 - **A freshly started node always gets the full 10 minutes.** The outage only counts while NodeWatch could fairly judge
   the node: the chain unit has been active for at least 10 minutes (systemd's own start time is checked, so a manual
   restart between two polls is noticed), `update-mosaic.service` (the Mosaic auto-update) is not running, and the polls
@@ -68,6 +74,30 @@ Safety rules:
 
 All of these numbers can be changed in the config (`Restart` section), and the watchdog can be switched off with
 `"Enabled": false`.
+
+## Session selection
+
+Mosaic does not use every validator in every session. About every hour (`ValidatorSubsetSelection`, at least 45
+minutes) the runtime selects a subset (currently 200) of the validators that are not chilled, with an algorithm that
+spreads the selections evenly over a week. The selected validators take turns in the 6-second Aura slots: author of
+slot *s* = the (*s* mod *n*)-th selected validator, so each gets a slot about every *n* × 6 seconds. A selected
+validator must author at least one block or send an "I am online" heartbeat (`ImOnline`) during the session; otherwise
+it is reported offline at the end of the session, which can make it `Faulted` and slash it.
+
+With `Node.ValidatorAddress` set, NodeWatch reads all this from the chain (`Session`, `Aura`, `ImOnline`,
+`ValidatorSubsetSelection` storage, through the safe RPC) and:
+
+- sends an **info message when the validator is selected** for the next session, with the expected time;
+- while selected, **checks each of its own slots** a minute after it: one empty slot is a warning (about every tenth slot
+  of the chain stays empty anyway), two in a row are critical and restart the chain at once;
+- if **85% of the selected session** is over with no block and no heartbeat, alerts and restarts at once, so the node may
+  still send its heartbeat before the session ends;
+- warns if the last selected session ended **offline**, and if the validator has **not been selected for 24 hours**
+  although it could be;
+- sends a **daily summary** (at 8:00 by default): how many times it was selected, blocks, missed slots, restarts.
+
+Selection notices and the summary are `info` messages: set the output's `MinSeverity` to `info` to get them.
+`nodewatch check` shows the current session and whether the validator is selected now or for the next one.
 
 ## Where alerts go
 
@@ -90,11 +120,11 @@ You need a release package `nodewatch-<version>.tar.gz` (from the
 On the node:
 
 ```bash
-wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.1/nodewatch-0.1.1.tar.gz
-wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.1.1/nodewatch-0.1.1.tar.gz.sha256
-sha256sum -c nodewatch-0.1.1.tar.gz.sha256
-tar -xzf nodewatch-0.1.1.tar.gz
-cd nodewatch-0.1.1
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.2.0/nodewatch-0.2.0.tar.gz
+wget https://github.com/Attila-maker/mosaic-live-watchdog/releases/download/v0.2.0/nodewatch-0.2.0.tar.gz.sha256
+sha256sum -c nodewatch-0.2.0.tar.gz.sha256
+tar -xzf nodewatch-0.2.0.tar.gz
+cd nodewatch-0.2.0
 sudo ./install.sh
 ```
 
@@ -137,7 +167,9 @@ The config file is JSON with comments: `/etc/nodewatch/appsettings.json`. The co
 | `Node.DataPath` | `/var/lib/mosaic-mainnet` | Folder whose disk is checked |
 | `Node.Services` | chain + indexer unit | Units to watch; the first one is critical |
 | `Checks.*` | see example | Poll interval and thresholds |
-| `Restart.*` | 10 min, 24 h, 15 min grace | The watchdog (see above) |
+| `Restart.*` | 10 min, 1 h, 6 a day, 15 min grace | The watchdog (see above) |
+| `Selection.*` | on, summary at 8 | Session selection watching (see above) |
+| `TimeZone` | system (UTC on the node) | Time zone of the times in the messages and of the daily summary, e.g. `Europe/Budapest` |
 | `Mode` | `direct` | `direct`, `relay` or `both` |
 | `Sinks` | one Telegram output | Outputs, each with its own `MinSeverity` (`info`, `warning`, `critical`) |
 
