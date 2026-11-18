@@ -302,7 +302,7 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
                 var k => new(CheckNames.MissedSlots, Level.Warning, "Kimaradt egy saját blokk",
                     $"Kiválasztott validátorként {k} saját blokkhelye maradt üresen" +
                     (chainTrouble
-                        ? $" (a láncon most a slotok {emptyRate:P0}-a üres, ez nem a node hibája). "
+                        ? $" (a láncon most a slotok {Text.Percent(emptyRate ?? 0)}-a üres, ez nem a node hibája). "
                         : " (a láncon kb. minden tizedik slot üres marad, ez önmagában még nem hiba). ") + summary,
                     current.MissedInRowSince, facts),
             });
@@ -319,7 +319,7 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
                      current.Authored == 0 && !current.Heartbeat && !info.KeysMissing;
         results.Add(atRisk
             ? new(CheckNames.OfflineRisk, Level.Critical, "A node offline-nak fog számítani",
-                $"A #{info.Index} session {info.Progress:P0}-ánál tart, de a node még egy blokkot sem gyártott, és életjelet " +
+                $"A #{info.Index} session {Text.Percent(info.Progress)}-ánál tart, de a node még egy blokkot sem gyártott, és életjelet " +
                 "sem küldött. Ha a session végéig így marad, a lánc offline-nak jelöli (Faulted, büntetés lehet).", now, facts)
             : new(CheckNames.OfflineRisk, Level.Ok, "A node jelentkezett ebben a sessionben", summary, null, facts));
 

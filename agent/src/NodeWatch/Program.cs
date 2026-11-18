@@ -169,11 +169,16 @@ internal static class Program
         {
             var blockTime = TimeSpan.FromSeconds(config.Selection.SlotSeconds * 1.1);
             var end = DateTimeOffset.UtcNow + blockTime * Math.Max(0, (long)si.SessionEnd - si.Block);
-            Console.WriteLine($"Session:      #{si.Index}, {si.Progress:P0}-nál tart, vége kb. {config.Local(end):HH:mm} " +
+            Console.WriteLine($"Session:      #{si.Index}, {Text.Percent(si.Progress)}-nál tart, vége kb. {config.Local(end):HH:mm} " +
                               $"(#{si.SessionEnd} blokk), {si.ActiveCount} kiválasztott validátor");
             Console.WriteLine(si.MyIndex is { } my
                 ? $"Kiválasztva:  igen, most ({my + 1}. a sorban): eddig {si.Authored} blokk, életjel: {(si.Heartbeat ? "elküldve" : "még nincs")}"
                 : "Kiválasztva:  most nem");
+            Console.WriteLine(!si.Expected ? "Életjel:      ebben a sessionben nem vár tőle a lánc (pl. unchill a session közben)"
+                : si.KeysMissing ? "Életjel:      HIBA – hiányzik az im_online kulcs (ImOnline.MissingKeys)"
+                : si.Heartbeat ? "Életjel:      elküldve ebben a sessionben"
+                : si.Authored > 0 ? "Életjel:      nem kell, a blokk is jelzi, hogy online"
+                : $"Életjel:      még nincs (a session második felében esedékes, most {Text.Percent(si.Progress)})");
             Console.WriteLine($"Következő:    {(si.SelectedNext ? "kiválasztva a következő sessionre" : "nincs kiválasztva")} ({si.NextCount} validátor)");
         }
         else if (s.SessionError is not null)

@@ -311,6 +311,9 @@ internal sealed class CheckEvaluator(Config config)
 
 internal static class Text
 {
+    /// <summary>"31%" (Hungarian writes the percent sign without a space, and the suffix goes after it: "31%-nál").</summary>
+    public static string Percent(double share) => $"{Math.Round(share * 100):0}%";
+
     /// <summary>"3-szor", "5-ször", "6-szor", "2-szer": the Hungarian "times" suffix follows how the number is said.</summary>
     public static string Times(int n)
     {
