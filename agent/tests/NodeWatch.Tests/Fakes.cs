@@ -22,6 +22,8 @@ internal sealed class FakeProbe : IProbe, IServiceStatus
     public string? DiskError { get; set; }
     public ValidatorState? Validator { get; set; }
     public SessionSim? Session { get; set; }
+    public bool ParaSyncing { get; set; }
+    public Dictionary<string, string> ExtraUnits { get; } = [];
 
     /// <summary>When the chain unit became active, as systemd would report it (set by the polls and by restarts).</summary>
     public DateTimeOffset? ChainActiveSince { get; set; }
@@ -52,10 +54,11 @@ internal sealed class FakeProbe : IProbe, IServiceStatus
         }
         s.ParaBest = ParaFinalized + 2;
         s.ParaFinalized = ParaFinalized;
-        s.ParaHealth = new ParaHealth(8, false);
+        s.ParaHealth = new ParaHealth(8, ParaSyncing);
         s.Services["mosaic-chain-mainnet.service"] = ChainState;
         s.Services["mosaic-indexer-mainnet.service"] = "active";
         s.Services["update-mosaic.service"] = UpdateState;
+        foreach (var (unit, unitState) in ExtraUnits) s.Services[unit] = unitState;
         if (DiskError is null) s.Disk = new DiskStatus("/var/lib/mosaic-mainnet", 40, 200);
         else s.DiskError = DiskError;
         s.Validator = Validator;
@@ -129,6 +132,9 @@ internal sealed class SessionSim
     /// <summary>A healthy node sends its heartbeat after half of the session; null: never.</summary>
     public double? HeartbeatAtProgress { get; set; } = 0.6;
     public bool KeysMissing { get; set; }
+
+    /// <summary>In ImOnline's set for this session (false: unchilled or bound during the session).</summary>
+    public bool InImOnline { get; set; } = true;
     public uint Authored { get; set; }
     public uint SessionLength { get; set; } = 600;
     public DateTimeOffset StartedAt { get; set; }
@@ -171,6 +177,7 @@ internal sealed class SessionSim
         {
             Index = Index, ActiveCount = Count, MyIndex = MyIndex, SelectedNext = SelectedNext, NextCount = NextCount,
             AuthorityCount = Count, Authored = MyIndex is null ? 0 : Authored, Heartbeat = Heartbeat, KeysMissing = KeysMissing,
+            Expected = MyIndex is not null || InImOnline || KeysMissing,
             CurrentSlot = slot,
             Block = block, SessionEnd = (uint)(sessionStart + SessionLength - 1), SessionLength = SessionLength,
             NextSessionEnd = (uint)(sessionStart + 2 * SessionLength - 1),

@@ -100,9 +100,11 @@ With `Node.ValidatorAddress` set, NodeWatch reads all this from the chain (`Sess
   could be;
 - sends a **daily summary** (at 8:00 by default): how many times it was selected, blocks, missed slots, restarts.
 
-Slots are only judged while the node is in sync, its chain unit runs and no restart is in progress, so a node that comes
-back is never blamed for the slots it had no chance at; a problem left over from before an agent or node restart waits
-the normal 10 minutes instead of restarting at once.
+Slots are only judged while the node is in sync, its chain unit runs and no restart is in progress. A short hiccup (one
+failed read) changes nothing; after a restart or a longer stretch the node is not blamed for the slots it had no chance
+at, and a problem left over from before an agent or node restart waits the normal 10 minutes instead of restarting at
+once. Whether the chain expects a heartbeat in a session is read from the chain (`ImOnline.Keys`), so a validator
+unchilled during a session is only expected from the next one.
 
 Selection notices and the summary are `info` messages: set the output's `MinSeverity` to `info` to get them.
 `nodewatch check` shows the current session and whether the validator is selected now or for the next one.

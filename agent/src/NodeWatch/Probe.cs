@@ -101,6 +101,11 @@ internal sealed record SessionInfo
     /// is reported offline at the end of every session it is not selected and producing in.</summary>
     public bool KeysMissing { get; init; }
 
+    /// <summary>The chain expects a block or a heartbeat from it in this session: it is in ImOnline's set, which is fixed at
+    /// the start of the session (ImOnline.Keys has its im_online key, or MissingKeys lists it), or it is selected. A
+    /// validator unchilled or bound during the session is not expected until the next one.</summary>
+    public bool Expected { get; init; }
+
     /// <summary>Aura slot of the block read.</summary>
     public ulong CurrentSlot { get; init; }
 
@@ -162,7 +167,8 @@ internal sealed class NodeProbe : IProbe
     private SessionSet? _sets;
 
     /// <summary>The validator lists of one session: they only change when the session changes.</summary>
-    private sealed record SessionSet(uint Index, int? MyIndex, int ActiveCount, bool SelectedNext, int NextCount, int AuthorityCount);
+    private sealed record SessionSet(uint Index, int? MyIndex, int ActiveCount, bool SelectedNext, int NextCount, int AuthorityCount,
+        bool InImOnline);
 
     /// <summary>Session keys of the Mosaic runtime: aura (sr25519) + im_online (sr25519).</summary>
     internal const int SessionKeysSize = 64;
@@ -304,8 +310,13 @@ internal sealed class NodeProbe : IProbe
             var queued = Scale.FixedVec(await Need("Session", "QueuedKeys"), 32 + SessionKeysSize);
             var authorities = Scale.FixedVec(await Need("Aura", "Authorities"), 32);
             var mine = validators.FindIndex(v => v.AsSpan().SequenceEqual(account));
+            // ImOnline.Keys maps the im_online key (second half of Session.NextKeys) to the validator for this session.
+            var nextKeys = await Read(StorageKeys.Map("Session", "NextKeys", account));
+            var inImOnline = nextKeys is { Length: SessionKeysSize } &&
+                             await Read(StorageKeys.Map("ImOnline", "Keys", nextKeys.AsSpan(32, 32))) is { } owner &&
+                             owner.AsSpan().SequenceEqual(account);
             _sets = new SessionSet(index, mine < 0 ? null : mine, validators.Count,
-                queued.Any(q => q.AsSpan(0, 32).SequenceEqual(account)), queued.Count, authorities.Count);
+                queued.Any(q => q.AsSpan(0, 32).SequenceEqual(account)), queued.Count, authorities.Count, inImOnline);
         }
 
         var sessionKey = StorageKeys.U32(index);
@@ -323,6 +334,7 @@ internal sealed class NodeProbe : IProbe
             Authored = authored is null ? 0 : Scale.U32(authored),
             Heartbeat = heartbeat is { Length: > 0 } && heartbeat[0] != 0,
             KeysMissing = keysMissing is not null,
+            Expected = _sets.MyIndex is not null || _sets.InImOnline || keysMissing is not null,
             CurrentSlot = Scale.U64(await Need("Aura", "CurrentSlot")),
             Block = JsonRpc.ParseNumber(header),
             SessionEnd = Scale.U32(await Need("ValidatorSubsetSelection", "CurrentSessionEnd")),

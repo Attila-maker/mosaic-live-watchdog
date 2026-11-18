@@ -31,8 +31,13 @@ internal sealed class SessionRecord
     public int MissedInRow { get; set; }
     public DateTimeOffset? MissedInRowSince { get; set; }
 
-    /// <summary>The next read skips everything up to its slot (the session data could not be read in between).</summary>
-    public bool Resync { get; set; }
+    /// <summary>Since when the slots cannot be judged (restart, node down or syncing, data not readable).</summary>
+    public DateTimeOffset? BlockedSince { get; set; }
+
+    public string? BlockedReason { get; set; }
+
+    /// <summary>The blocked stretch was a restart or long: own slots up to this slot are skipped, not judged.</summary>
+    public ulong SkipUpToSlot { get; set; }
 
     public double LastProgress { get; set; }
 
@@ -89,19 +94,17 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
         TrackSelectable(snapshot, now);
         if (snapshot.Session is { } info)
         {
-            results.Add(new(CheckNames.SessionData, Level.Ok, "A session-adatok újra olvashatók", ""));
             var current = Advance(info, snapshot, now);
             WatchSession(info, current, snapshot, now, results);
             Notify(info, now, notices);
         }
         else
         {
-            // Not readable (RPC down, node restarting): the slots in between are not judged when it comes back.
+            // Not readable (RPC down, node restarting): judged again when it is back; a long gap is skipped then.
             if (S.Current is { } current)
             {
-                current.Resync = true;
-                current.MissedInRow = 0;
-                current.MissedInRowSince = null;
+                current.BlockedSince ??= now;
+                current.BlockedReason ??= "a session-adatok nem olvashatók";
             }
             if (snapshot.SessionError is not null && snapshot.ParaError is null)
                 results.Add(new(CheckNames.SessionData, Level.Warning, "A session-adatok nem kérdezhetők le",
@@ -155,7 +158,9 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
             Matched = info.Authored,
         };
         current.Selected |= info.MyIndex is not null;
-        current.Expected |= current.Selected || Selectable(snapshot);
+        // From the chain, not from the validator state: unchilled or bound during the session, it is expected only from
+        // the next session on.
+        current.Expected = info.Expected;
         // The value of the best block: a reorg may take a block back.
         current.Authored = info.Authored;
         if (current.Matched > current.Authored) current.Matched = current.Authored;
@@ -169,31 +174,62 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
         List<CheckResult> results)
     {
         // Can the node's slots be judged right now? Not while restarting, out of sync, or when its chain view is old.
+        // "unknown" (systemctl did not answer) is not a reason: the session data was read, so the node runs.
         var restarting = state.GraceUntil is { } grace && now < grace;
-        var unitActive = snapshot.Services.GetValueOrDefault(config.Restart.Unit, "active") == "active";
+        var unitState = snapshot.Services.GetValueOrDefault(config.Restart.Unit, "unknown");
+        var unitDown = unitState is not ("active" or "unknown");
         var syncing = snapshot.ParaHealth?.IsSyncing == true;
         var stale = now - SlotStart(info.CurrentSlot) > StaleSlot;
-        var judgeable = !restarting && unitActive && !syncing && !stale;
+        var blockedReason = restarting ? "újraindítás után vár"
+            : unitDown ? $"a(z) {config.Restart.Unit} állapota {unitState}"
+            : syncing ? "a parachain szinkronizál"
+            : stale ? $"a node legutóbbi blokkja {Text.Length(now - SlotStart(info.CurrentSlot))} régi"
+            : null;
         var emptyRate = ChainEmptyRate(info, now);
+        var n = (ulong)Math.Max(1, info.AuthorityCount);
 
-        if (!judgeable || current.Resync)
+        if (blockedReason is not null)
         {
-            // Skip everything up to now, and the blocks of that time with it.
-            current.JudgedUpToSlot = Math.Max(current.JudgedUpToSlot, info.CurrentSlot);
-            current.Matched = current.Authored;
-            current.MissedInRow = 0;
-            current.MissedInRowSince = null;
-            current.Resync = false;
+            // Not judged now; whether the slots of this stretch count is decided when it ends.
+            current.BlockedSince ??= now;
+            current.BlockedReason = blockedReason;
+            if (restarting)
+            {
+                current.MissedInRow = 0;
+                current.MissedInRowSince = null;
+            }
         }
-        else if (info.MyIndex is { } me && info.AuthorityCount == info.ActiveCount && info.AuthorityCount > 0)
+        else if (current.BlockedSince is { } blockedSince)
+        {
+            // A short hiccup (one failed read, a moment of syncing) changes nothing: the slots are judged as usual. After
+            // a restart or a long stretch the node had no fair chance at those slots: they are skipped.
+            var stretch = now - blockedSince;
+            var longStretch = stretch > TimeSpan.FromMinutes(3) || stretch > TimeSpan.FromSeconds((double)n * O.SlotSeconds) ||
+                              state.GraceUntil is { } g && g > blockedSince;
+            if (longStretch)
+            {
+                current.SkipUpToSlot = Math.Max(current.SkipUpToSlot, info.CurrentSlot);
+                current.MissedInRow = 0;
+                current.MissedInRowSince = null;
+            }
+            current.BlockedSince = null;
+            current.BlockedReason = null;
+        }
+
+        if (blockedReason is null && info.MyIndex is { } me && info.AuthorityCount == info.ActiveCount && info.AuthorityCount > 0)
         {
             // Judged on the chain's own slot, not the wall clock: if the whole chain stands, the stall checks speak.
-            var n = (ulong)info.AuthorityCount;
             var graceSlots = (ulong)Math.Ceiling(O.MissedSlotGraceSeconds / (double)O.SlotSeconds);
             var upTo = info.CurrentSlot > graceSlots ? info.CurrentSlot - graceSlots : 0;
             var from = current.JudgedUpToSlot + 1;
             for (var slot = from + ((ulong)me + n - from % n) % n; slot <= upTo; slot += n)
             {
+                if (slot <= current.SkipUpToSlot)
+                {
+                    // Skipped: its block, if there is one, is used up so it cannot hide a later miss.
+                    if (current.Authored > current.Matched) current.Matched++;
+                    continue;
+                }
                 // Blocks arrive in slot order: an unmatched block belongs to the oldest unjudged own slot.
                 if (current.Authored > current.Matched)
                 {
@@ -247,9 +283,15 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
             });
         }
 
-        // Every validator that is not chilled must show it is online in every session, selected or not.
-        var atRisk = current.Expected && judgeable && info.Progress >= O.OfflineRiskProgress && current.Authored == 0 &&
-                     !current.Heartbeat && !info.KeysMissing;
+        results.Add(current.BlockedSince is { } since && now - since >= TimeSpan.FromMinutes(15)
+            ? new(CheckNames.SessionData, Level.Warning, "A blokkgyártás figyelése szünetel",
+                $"{Text.Duration(now - since)} nem ítélhetők meg a node blokkhelyei: {current.BlockedReason}. Ha ez tartós, " +
+                "nézd meg a Restart.Unit beállítást és a node naplóját.", since)
+            : new(CheckNames.SessionData, Level.Ok, "A session-adatok újra olvashatók", ""));
+
+        // Every validator in ImOnline's set must show it is online in every session, selected or not.
+        var atRisk = current.Expected && blockedReason is null && info.Progress >= O.OfflineRiskProgress &&
+                     current.Authored == 0 && !current.Heartbeat && !info.KeysMissing;
         results.Add(atRisk
             ? new(CheckNames.OfflineRisk, Level.Critical, "A node offline-nak fog számítani",
                 $"A #{info.Index} session {info.Progress:P0}-ánál tart, de a node még egy blokkot sem gyártott, és életjelet " +

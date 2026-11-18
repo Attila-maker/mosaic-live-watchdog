@@ -219,6 +219,52 @@ internal static class SelectionTests
     }
 
     [Test]
+    public static async Task Short_hiccups_do_not_hide_a_node_that_never_authors()
+    {
+        var w = NewWorld();
+        await w.RunFor(TimeSpan.FromMinutes(12));
+        w.Sim.Start(w.Now, 101, myIndex: 3);
+        w.Sim.Produce = false; // heartbeats go out, blocks never
+        for (var i = 0; i < 3 && w.Restarter.Count == 0; i++)
+        {
+            await w.RunFor(TimeSpan.FromSeconds(60));
+            w.Sim.Error = "timeout"; // one failed read
+            await w.RunFor(TimeSpan.FromSeconds(30));
+            w.Sim.Error = null;
+            w.Probe.ParaSyncing = true; // one poll of "syncing"
+            await w.RunFor(TimeSpan.FromSeconds(30));
+            w.Probe.ParaSyncing = false;
+        }
+        Assert.Equal(1, w.Restarter.Count, "hiccups of one poll do not reset the streak");
+    }
+
+    [Test]
+    public static async Task Unchilled_during_the_session_is_not_expected_until_the_next()
+    {
+        var w = NewWorld();
+        await w.RunFor(TimeSpan.FromMinutes(12));
+        w.Sim.Start(w.Now, 101, myIndex: null);
+        w.Sim.InImOnline = false; // unchilled mid-session: the node's offchain worker sends no heartbeat this session
+        w.Sim.HeartbeatAtProgress = null;
+        await w.RunFor(TimeSpan.FromMinutes(58));
+        Assert.Equal(0, w.Restarter.Count, "no restart");
+        w.Sim.Start(w.Now, 102, myIndex: null);
+        w.Sim.InImOnline = true;
+        w.Sim.HeartbeatAtProgress = 0.6;
+        await w.RunFor(TimeSpan.FromMinutes(3));
+        Assert.Equal(0, w.Titled("Az előző sessionben nem jelentkezett a node").Count, "no false offline result");
+    }
+
+    [Test]
+    public static async Task Watching_paused_for_long_is_reported()
+    {
+        var w = NewWorld(c => c.Restart.Unit = "rossz-nev.service");
+        w.Probe.ExtraUnits["rossz-nev.service"] = "inactive"; // what systemctl says about a unit that does not exist
+        await w.RunFor(TimeSpan.FromMinutes(20));
+        Assert.Equal(1, w.Titled("A blokkgyártás figyelése szünetel").Count, "a wrong unit name does not switch it off silently");
+    }
+
+    [Test]
     public static async Task Chain_wide_empty_slots_do_not_restart()
     {
         var w = NewWorld();

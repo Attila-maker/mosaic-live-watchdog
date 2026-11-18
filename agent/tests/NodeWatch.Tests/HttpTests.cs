@@ -302,6 +302,53 @@ internal static class HttpTests
     }
 
     [Test]
+    public static async Task NodeProbe_finds_an_unselected_validator_in_the_im_online_set()
+    {
+        const string alice = "15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5";
+        var me = Ss58.DecodePublicKey(alice);
+        byte[] Fill(byte b) => Enumerable.Repeat(b, 32).ToArray();
+        string Hex(params byte[][] parts) => "0x" + Convert.ToHexStringLower(parts.SelectMany(x => x).ToArray());
+        async Task<SessionInfo> Probe(bool inKeys)
+        {
+            var storage = new Dictionary<string, string>
+            {
+                [StorageKeys.Value("Session", "CurrentIndex")] = "0x07000000",
+                [StorageKeys.Value("Session", "Validators")] = Hex([0x04], Fill(0x11)),
+                [StorageKeys.Value("Session", "QueuedKeys")] = Hex([0x00]),
+                [StorageKeys.Value("Aura", "Authorities")] = Hex([0x04], Fill(0x44)),
+                [StorageKeys.Value("Aura", "CurrentSlot")] = Hex(BitConverter.GetBytes(5UL)),
+                [StorageKeys.Map("Session", "NextKeys", me)] = Hex(Fill(0xaa), Fill(0xbb)),
+                [StorageKeys.Value("ValidatorSubsetSelection", "CurrentSessionEnd")] = "0x88130000",
+                [StorageKeys.Value("ValidatorSubsetSelection", "CurrentSessionLength")] = "0x58020000",
+                [StorageKeys.Value("ValidatorSubsetSelection", "NextSessionEnd")] = "0xe0150000",
+            };
+            if (inKeys) storage[StorageKeys.Map("ImOnline", "Keys", Fill(0xbb))] = Hex(me);
+            await using var para = new FakeServer((_, body) => (200, RpcResult(body, (m, p) => m switch
+            {
+                "chain_getBlockHash" => "0xbe57",
+                "chain_getFinalizedHead" => "0xf1",
+                "system_health" => new { peers = 8, isSyncing = false },
+                "chain_getHeader" => new { number = "0x1194" },
+                "state_getStorage" => storage.GetValueOrDefault(p[0].GetString()!),
+                _ => null,
+            })));
+            await using var relay = new FakeServer((_, body) => (200, RpcResult(body, (_, _) => new { number = "0x10" })));
+            var config = TestConfig.Create(TestConfig.TempDir());
+            config.Node.ValidatorAddress = alice;
+            config.Node.RelayRpc = relay.Url;
+            config.Node.ParaRpc = para.Url;
+            using var http = new HttpClient();
+            var s = await new NodeProbe(config, http, new FixedServices()).CollectAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+            return s.Session ?? throw new InvalidOperationException(s.SessionError);
+        }
+
+        var expected = await Probe(inKeys: true);
+        Assert.Equal(null, expected.MyIndex, "not selected");
+        Assert.True(expected.Expected, "in ImOnline.Keys: a heartbeat is expected");
+        Assert.True(!(await Probe(inKeys: false)).Expected, "not in the set (unchilled this session): not expected");
+    }
+
+    [Test]
     public static async Task NodeProbe_survives_strange_answers()
     {
         // Relay: header is null (broken database); para: an error without a message, then a non-object body.
