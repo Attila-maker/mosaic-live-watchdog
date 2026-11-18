@@ -71,7 +71,7 @@ event itself.
 
 `relay.rpc`, `relay.block_progress`, `relay.full_peers`, `para.rpc`, `para.finality`, `para.sync`, `validator.state`,
 `host.disk`, `host.service.<unit>`, `validator.missed_slots`, `validator.offline_risk`, `validator.session`,
-`validator.not_selected`, `validator.session_data`, `restart` (the watchdog's own alerts), `agent` (NodeWatch cannot
+`validator.not_selected`, `validator.session_data`, `validator.keys`, `restart` (the watchdog's own alerts), `agent` (NodeWatch cannot
 poll the node), `test` (from `nodewatch test-alert`).
 
 ### Notices

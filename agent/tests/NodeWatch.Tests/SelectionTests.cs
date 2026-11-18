@@ -117,6 +117,7 @@ internal static class SelectionTests
         w.Sim.Count = 1000;
         w.Sim.Start(w.Now, 101, myIndex: 999);
         w.Sim.Produce = false;
+        w.Sim.HeartbeatAtProgress = null;
         await w.RunFor(TimeSpan.FromMinutes(50));
         Assert.Equal(0, w.Restarter.Count, "not before 85% of the session");
         await w.RunFor(TimeSpan.FromMinutes(3));
@@ -133,7 +134,7 @@ internal static class SelectionTests
         await w.RunFor(TimeSpan.FromMinutes(12));
         w.Sim.Count = 1000;
         w.Sim.Start(w.Now, 101, myIndex: 999);
-        w.Sim.Heartbeat = true;
+        w.Sim.HeartbeatAtProgress = 0.7;
         await w.RunFor(TimeSpan.FromMinutes(58));
         Assert.Equal(0, w.Restarter.Count, "the heartbeat counts as online");
     }
@@ -145,18 +146,89 @@ internal static class SelectionTests
         w.Sim.Count = 1000;
         w.Sim.Start(w.Now, 101, myIndex: 999);
         w.Sim.Produce = false;
-        await w.RunFor(TimeSpan.FromMinutes(10));
+        w.Sim.HeartbeatAtProgress = null;
+        await w.RunFor(TimeSpan.FromMinutes(59));
         w.Sim.Start(w.Now, 102, myIndex: null);
+        w.Sim.HeartbeatAtProgress = 0.6;
         await w.RunFor(TimeSpan.FromMinutes(2));
         Assert.Equal(1, w.Titled("Az előző sessionben nem jelentkezett a node").Count, "reported");
 
-        w.Sim.Count = 10;
-        w.Sim.Produce = true;
-        w.Sim.Start(w.Now, 103, myIndex: 3);
-        await w.RunFor(TimeSpan.FromMinutes(5));
-        w.Sim.Start(w.Now, 104, myIndex: null);
+        await w.RunFor(TimeSpan.FromMinutes(58));
+        w.Sim.Start(w.Now, 103, myIndex: null);
         await w.RunFor(TimeSpan.FromMinutes(2));
-        Assert.Equal(1, w.Titled("A legutóbbi kiválasztott sessionben rendben dolgozott").Count, "resolved");
+        Assert.Equal(1, w.Titled("A legutóbbi sessionben rendben jelentkezett a node").Count, "resolved by a session with a heartbeat");
+    }
+
+    [Test]
+    public static async Task Unselected_session_without_heartbeat_is_an_offline_risk_too()
+    {
+        var w = NewWorld();
+        await w.RunFor(TimeSpan.FromMinutes(12));
+        w.Sim.Start(w.Now, 101, myIndex: null);
+        w.Sim.HeartbeatAtProgress = null;
+        await w.RunFor(TimeSpan.FromMinutes(53));
+        Assert.Equal(1, w.Restarter.Count, "not selected, but the chain expects a heartbeat from it every session");
+    }
+
+    [Test]
+    public static async Task Missing_im_online_key_alerts_without_restart()
+    {
+        var w = NewWorld();
+        await w.RunFor(TimeSpan.FromMinutes(12));
+        w.Sim.Start(w.Now, 101, myIndex: null);
+        w.Sim.HeartbeatAtProgress = null;
+        w.Sim.KeysMissing = true;
+        await w.RunFor(TimeSpan.FromMinutes(58));
+        Assert.Equal(1, w.Titled("Hiányzik a validátor im_online kulcsa").Count, "alert");
+        Assert.Equal(0, w.Restarter.Count, "a restart does not fix a missing key");
+    }
+
+    [Test]
+    public static async Task Produce_miss_produce_miss_with_many_validators_never_restarts()
+    {
+        var w = NewWorld();
+        await w.RunFor(TimeSpan.FromMinutes(12));
+        // 200 validators: own slots 20 minutes apart, blocks show up long before they are judged.
+        w.Sim.Count = 200;
+        w.Sim.SessionLength = 1200;
+        w.Sim.Start(w.Now, 101, myIndex: 7);
+        for (var i = 0; i < 6; i++)
+        {
+            w.Sim.Produce = i % 2 == 0;
+            await w.RunFor(TimeSpan.FromMinutes(20));
+        }
+        Assert.Equal(0, w.Restarter.Count, "never two misses in a row");
+    }
+
+    [Test]
+    public static async Task Old_miss_streak_does_not_restart_a_node_that_came_back()
+    {
+        var w = NewWorld();
+        await w.RunFor(TimeSpan.FromMinutes(12));
+        w.Sim.Start(w.Now, 101, myIndex: 3);
+        w.Sim.Produce = false;
+        await w.RunFor(TimeSpan.FromSeconds(150)); // one miss
+        // Restarted by hand: the session data is not readable for a while, then it is back and producing.
+        w.Sim.Error = "connection refused";
+        w.Probe.ChainActiveSince = null;
+        await w.RunFor(TimeSpan.FromMinutes(2));
+        w.Sim.Error = null;
+        w.Sim.Produce = true;
+        await w.RunFor(TimeSpan.FromMinutes(15));
+        Assert.Equal(0, w.Restarter.Count, "the old miss does not count");
+    }
+
+    [Test]
+    public static async Task Chain_wide_empty_slots_do_not_restart()
+    {
+        var w = NewWorld();
+        await w.RunFor(TimeSpan.FromMinutes(12));
+        w.Sim.Start(w.Now, 101, myIndex: 3);
+        w.Sim.Produce = false;
+        w.Sim.ChainEmptyShare = 0.5; // half of all slots stay empty: a chain problem
+        await w.RunFor(TimeSpan.FromMinutes(5));
+        Assert.Equal(0, w.Restarter.Count, "not this node's fault");
+        Assert.True(w.Titled("Kimaradt egy saját blokk").Count >= 1, "still a warning");
     }
 
     [Test]
@@ -256,6 +328,8 @@ internal static class SelectionTests
         again.Sim.Produce = false;
         again.Probe.ChainActiveSince = w.Now - TimeSpan.FromMinutes(20);
         await again.RunFor(TimeSpan.FromSeconds(90));
-        Assert.Equal(1, again.Restarter.Count, "the second miss in a row still counts after the agent restart");
+        Assert.Equal(0, again.Restarter.Count, "a streak from before the agent started does not restart at once");
+        await again.RunFor(TimeSpan.FromMinutes(10));
+        Assert.Equal(1, again.Restarter.Count, "but it still counts: restart after the normal 10 minutes");
     }
 }

@@ -125,11 +125,20 @@ internal sealed class SessionSim
     public int NextCount { get; set; } = 10;
     public bool Produce { get; set; } = true;
     public bool Heartbeat { get; set; }
+
+    /// <summary>A healthy node sends its heartbeat after half of the session; null: never.</summary>
+    public double? HeartbeatAtProgress { get; set; } = 0.6;
+    public bool KeysMissing { get; set; }
     public uint Authored { get; set; }
     public uint SessionLength { get; set; } = 600;
     public DateTimeOffset StartedAt { get; set; }
     public string? Error { get; set; }
+
+    /// <summary>Share of the chain's slots without a block (blocks per slot = 1 - this).</summary>
+    public double ChainEmptyShare { get; set; }
     private ulong? _lastSlot;
+    private double _blocks;
+    private long _sessionStart = FirstBlock;
 
     public const uint FirstBlock = 1_000_000;
 
@@ -141,23 +150,30 @@ internal sealed class SessionSim
         StartedAt = now;
         Authored = 0;
         Heartbeat = false;
+        _sessionStart = FirstBlock + (long)_blocks;
     }
 
     public SessionInfo Read(DateTimeOffset now)
     {
         var slot = (ulong)now.ToUnixTimeSeconds() / 6;
-        if (_lastSlot is { } last && MyIndex is { } me && Produce)
+        if (_lastSlot is { } last)
+        {
             for (var s = last + 1; s <= slot; s++)
-                if (s % (ulong)Count == (ulong)me) Authored++;
+                if (MyIndex is { } me && Produce && s % (ulong)Count == (ulong)me) Authored++;
+            _blocks += (slot - last) * (1 - ChainEmptyShare);
+        }
         _lastSlot = slot;
-        var sessionStart = FirstBlock + Index * SessionLength;
-        var block = sessionStart + (long)((now - StartedAt).TotalSeconds / 6);
+        var sessionStart = _sessionStart;
+        var block = FirstBlock + (long)_blocks;
+        var progress = (double)(block - sessionStart + 1) / SessionLength;
+        if (HeartbeatAtProgress is { } at && progress >= at) Heartbeat = true;
         return new SessionInfo
         {
             Index = Index, ActiveCount = Count, MyIndex = MyIndex, SelectedNext = SelectedNext, NextCount = NextCount,
-            AuthorityCount = Count, Authored = MyIndex is null ? 0 : Authored, Heartbeat = Heartbeat, CurrentSlot = slot,
-            Block = block, SessionEnd = sessionStart + SessionLength - 1, SessionLength = SessionLength,
-            NextSessionEnd = sessionStart + 2 * SessionLength - 1,
+            AuthorityCount = Count, Authored = MyIndex is null ? 0 : Authored, Heartbeat = Heartbeat, KeysMissing = KeysMissing,
+            CurrentSlot = slot,
+            Block = block, SessionEnd = (uint)(sessionStart + SessionLength - 1), SessionLength = SessionLength,
+            NextSessionEnd = (uint)(sessionStart + 2 * SessionLength - 1),
         };
     }
 }

@@ -1,11 +1,17 @@
 namespace NodeWatch;
 
-/// <summary>What happened to the validator in one selected session.</summary>
+/// <summary>What happened to the validator in one session.</summary>
 internal sealed class SessionRecord
 {
     public uint Index { get; set; }
     public DateTimeOffset StartedAt { get; set; }
     public DateTimeOffset? EndedAt { get; set; }
+
+    /// <summary>Selected into the session's validator subset (it had Aura slots).</summary>
+    public bool Selected { get; set; }
+
+    /// <summary>The chain expected a block or a heartbeat from it (selected, or not chilled).</summary>
+    public bool Expected { get; set; }
 
     /// <summary>Blocks authored in the session (ImOnline.AuthoredBlocks, last value seen).</summary>
     public uint Authored { get; set; }
@@ -16,25 +22,33 @@ internal sealed class SessionRecord
     public int Produced { get; set; }
     public int Missed { get; set; }
 
-    /// <summary>Own slots up to this slot are judged.</summary>
+    /// <summary>Own slots up to this slot are judged (or skipped).</summary>
     public ulong JudgedUpToSlot { get; set; }
 
-    /// <summary>Authored blocks already matched to judged slots.</summary>
+    /// <summary>Authored blocks already matched to judged or skipped slots.</summary>
     public uint Matched { get; set; }
 
     public int MissedInRow { get; set; }
     public DateTimeOffset? MissedInRowSince { get; set; }
 
-    /// <summary>The session ended with no block and no heartbeat: the chain marks such a validator offline.</summary>
-    public bool Offline => EndedAt is not null && Authored == 0 && !Heartbeat;
+    /// <summary>The next read skips everything up to its slot (the session data could not be read in between).</summary>
+    public bool Resync { get; set; }
+
+    public double LastProgress { get; set; }
+
+    /// <summary>The end of the session was not seen (no read near its end): its result is not known.</summary>
+    public bool Unknown { get; set; }
+
+    /// <summary>The session ended with no block and no heartbeat: the chain reports such a validator offline.</summary>
+    public bool Offline => EndedAt is not null && Expected && !Unknown && Authored == 0 && !Heartbeat;
 }
 
 internal sealed class SelectionState
 {
-    /// <summary>The selected session in progress (survives an agent restart).</summary>
+    /// <summary>The session in progress (survives an agent restart).</summary>
     public SessionRecord? Current { get; set; }
 
-    /// <summary>Finished selected sessions of the last two days.</summary>
+    /// <summary>Finished sessions of the last two days.</summary>
     public List<SessionRecord> History { get; set; } = [];
 
     /// <summary>The selection notice already went out for this session.</summary>
@@ -49,14 +63,22 @@ internal sealed class SelectionState
 }
 
 /// <summary>
-/// Watches the validator's part in the session rotation: selection notices, its own Aura slots while selected, the
-/// offline risk before the end of the session, the result of the session, a long time without selection, and the daily
-/// summary. Gives check results (alerts, restart triggers) and notices (info messages).
+/// Watches the validator's part in the session rotation. Every session the chain expects a block or an "I am online"
+/// heartbeat from every validator that is not chilled (ImOnline over NftStaking's slashable validators), and the selected
+/// subset also takes turns in the Aura slots. Gives check results (alerts, restart triggers) and notices (info messages).
+/// Slots are only judged while the node is in sync and not restarting, so a node coming back is never blamed for the
+/// slots it had no chance at.
 /// </summary>
 internal sealed class SelectionWatcher(Config config, EventFactory events, AgentState state)
 {
     private SelectionOptions O => config.Selection;
     private SelectionState S => state.Selection;
+
+    /// <summary>The best block's slot is older than this: the node (or the chain) is not producing, slots are not judged.</summary>
+    private static readonly TimeSpan StaleSlot = TimeSpan.FromMinutes(2);
+
+    /// <summary>(slot, block) samples of the last minutes, for the chain-wide empty slot rate.</summary>
+    private readonly Queue<(DateTimeOffset At, ulong Slot, long Block)> _samples = new();
 
     public (List<CheckResult> Results, List<CloudEvent> Notices) Process(Snapshot snapshot, DateTimeOffset now)
     {
@@ -68,15 +90,23 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
         if (snapshot.Session is { } info)
         {
             results.Add(new(CheckNames.SessionData, Level.Ok, "A session-adatok újra olvashatók", ""));
-            FinishSession(info, now);
-            WatchSlots(info, snapshot, now, results);
+            var current = Advance(info, snapshot, now);
+            WatchSession(info, current, snapshot, now, results);
             Notify(info, now, notices);
         }
-        else if (snapshot.SessionError is not null)
+        else
         {
-            results.Add(new(CheckNames.SessionData, Level.Warning, "A session-adatok nem kérdezhetők le",
-                $"{snapshot.SessionError}. A kiválasztás és a blokkgyártás figyelése addig szünetel. Ha a Mosaic runtime " +
-                "frissült, lehet, hogy a NodeWatch-ot is frissíteni kell."));
+            // Not readable (RPC down, node restarting): the slots in between are not judged when it comes back.
+            if (S.Current is { } current)
+            {
+                current.Resync = true;
+                current.MissedInRow = 0;
+                current.MissedInRowSince = null;
+            }
+            if (snapshot.SessionError is not null && snapshot.ParaError is null)
+                results.Add(new(CheckNames.SessionData, Level.Warning, "A session-adatok nem kérdezhetők le",
+                    $"{snapshot.SessionError}. A kiválasztás és a blokkgyártás figyelése addig szünetel. Ha a Mosaic runtime " +
+                    "frissült, lehet, hogy a NodeWatch-ot is frissíteni kell."));
         }
 
         results.AddRange(SessionResult());
@@ -86,12 +116,14 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
         return (results, notices);
     }
 
+    private bool Selectable(Snapshot s) => s.Validator is { } v && v.Kind != ValidatorStateKind.Chilled;
+
     private void TrackSelectable(Snapshot s, DateTimeOffset now)
     {
-        if (s.Validator is { } v)
+        if (s.Validator is not null)
         {
-            if (v.Kind == ValidatorStateKind.Chilled) S.SelectableSince = null;
-            else S.SelectableSince ??= now;
+            if (Selectable(s)) S.SelectableSince ??= now;
+            else S.SelectableSince = null;
         }
         else if (s.ValidatorMissing)
         {
@@ -99,26 +131,21 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
         }
     }
 
-    private void FinishSession(SessionInfo info, DateTimeOffset now)
+    /// <summary>Closes the previous session's record when a new session starts, and returns the current one.</summary>
+    private SessionRecord Advance(SessionInfo info, Snapshot snapshot, DateTimeOffset now)
     {
-        if (S.Current is not { } current || (info.MyIndex is not null && current.Index == info.Index)) return;
-        current.EndedAt = now;
-        S.History.Add(current);
-        S.Current = null;
-        Log.Info($"A #{current.Index} session véget ért: {current.Authored} blokk, {current.Missed} kihagyott slot, " +
-                 $"életjel: {(current.Heartbeat ? "igen" : "nem")}.");
-    }
-
-    private void WatchSlots(SessionInfo info, Snapshot snapshot, DateTimeOffset now, List<CheckResult> results)
-    {
-        if (info.MyIndex is not { } me)
+        if (S.Current is { } previous && previous.Index != info.Index)
         {
-            results.Add(new(CheckNames.MissedSlots, Level.Ok, "A kiválasztott session véget ért", "A blokkhelyek figyelése szünetel."));
-            results.Add(new(CheckNames.OfflineRisk, Level.Ok, "A kiválasztott session véget ért", ""));
-            return;
+            previous.EndedAt = now;
+            // Values are read every poll; without a read near the end, a block or heartbeat at the end may be missing.
+            previous.Unknown = previous.LastProgress < 0.95;
+            S.History.Add(previous);
+            S.Current = null;
+            Log.Info($"A #{previous.Index} session véget ért: kiválasztva: {(previous.Selected ? "igen" : "nem")}, " +
+                     $"{previous.Authored} blokk, {previous.Missed} kihagyott slot, életjel: {(previous.Heartbeat ? "igen" : "nem")}" +
+                     (previous.Unknown ? " (a vége nem látszott)." : "."));
         }
 
-        S.LastSelectedAt = now;
         var current = S.Current ??= new SessionRecord
         {
             Index = info.Index,
@@ -126,30 +153,48 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
             // Started watching mid-session (agent start): earlier slots and blocks are not judged.
             JudgedUpToSlot = info.CurrentSlot,
             Matched = info.Authored,
-            Authored = info.Authored,
         };
-        current.Authored = Math.Max(current.Authored, info.Authored);
+        current.Selected |= info.MyIndex is not null;
+        current.Expected |= current.Selected || Selectable(snapshot);
+        // The value of the best block: a reorg may take a block back.
+        current.Authored = info.Authored;
+        if (current.Matched > current.Authored) current.Matched = current.Authored;
         current.Heartbeat |= info.Heartbeat;
+        current.LastProgress = info.Progress;
+        if (current.Selected) S.LastSelectedAt = now;
+        return current;
+    }
 
-        // Restarting: the slots of the grace period are not the node's fault, and a miss streak starts again after it.
+    private void WatchSession(SessionInfo info, SessionRecord current, Snapshot snapshot, DateTimeOffset now,
+        List<CheckResult> results)
+    {
+        // Can the node's slots be judged right now? Not while restarting, out of sync, or when its chain view is old.
         var restarting = state.GraceUntil is { } grace && now < grace;
-        if (restarting)
+        var unitActive = snapshot.Services.GetValueOrDefault(config.Restart.Unit, "active") == "active";
+        var syncing = snapshot.ParaHealth?.IsSyncing == true;
+        var stale = now - SlotStart(info.CurrentSlot) > StaleSlot;
+        var judgeable = !restarting && unitActive && !syncing && !stale;
+        var emptyRate = ChainEmptyRate(info, now);
+
+        if (!judgeable || current.Resync)
         {
+            // Skip everything up to now, and the blocks of that time with it.
+            current.JudgedUpToSlot = Math.Max(current.JudgedUpToSlot, info.CurrentSlot);
+            current.Matched = current.Authored;
             current.MissedInRow = 0;
             current.MissedInRowSince = null;
+            current.Resync = false;
         }
-
-        // Judged on the chain's own slot, not the wall clock: if the whole chain stands, the stall checks speak instead.
-        if (info.AuthorityCount == info.ActiveCount && info.AuthorityCount > 0)
+        else if (info.MyIndex is { } me && info.AuthorityCount == info.ActiveCount && info.AuthorityCount > 0)
         {
+            // Judged on the chain's own slot, not the wall clock: if the whole chain stands, the stall checks speak.
             var n = (ulong)info.AuthorityCount;
             var graceSlots = (ulong)Math.Ceiling(O.MissedSlotGraceSeconds / (double)O.SlotSeconds);
             var upTo = info.CurrentSlot > graceSlots ? info.CurrentSlot - graceSlots : 0;
             var from = current.JudgedUpToSlot + 1;
             for (var slot = from + ((ulong)me + n - from % n) % n; slot <= upTo; slot += n)
             {
-                var start = SlotStart(slot);
-                if (restarting || state.GraceUntil is { } g && start <= g) continue;
+                // Blocks arrive in slot order: an unmatched block belongs to the oldest unjudged own slot.
                 if (current.Authored > current.Matched)
                 {
                     current.Matched++;
@@ -161,45 +206,73 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
                 {
                     current.Missed++;
                     current.MissedInRow++;
-                    current.MissedInRowSince ??= start;
-                    Log.Warn($"Kihagyott blokkhely: #{slot} slot ({config.Local(start):HH:mm:ss}), egymás után {current.MissedInRow}.");
+                    current.MissedInRowSince ??= SlotStart(slot);
+                    Log.Warn($"Kihagyott blokkhely: #{slot} slot ({config.Local(SlotStart(slot)):HH:mm:ss}), " +
+                             $"egymás után {current.MissedInRow}.");
                 }
             }
             if (upTo > current.JudgedUpToSlot) current.JudgedUpToSlot = upTo;
-            // A block that was not matched to a judged slot still shows the node works.
-            if (current.Authored > current.Matched && current.MissedInRow > 0)
-            {
-                current.Matched = current.Authored;
-                current.MissedInRow = 0;
-                current.MissedInRowSince = null;
-            }
         }
 
         var facts = new Dictionary<string, object?>
         {
-            ["session"] = info.Index, ["authored"] = current.Authored, ["missed"] = current.Missed,
-            ["heartbeat"] = current.Heartbeat, ["progress"] = Math.Round(info.Progress, 2),
+            ["session"] = info.Index, ["selected"] = current.Selected, ["authored"] = current.Authored,
+            ["missed"] = current.Missed, ["heartbeat"] = current.Heartbeat, ["progress"] = Math.Round(info.Progress, 2),
+            ["chainEmptySlots"] = emptyRate is { } r ? Math.Round(r, 2) : null,
         };
         var summary = $"Ebben a sessionben eddig {current.Authored} blokk, {current.Missed} kihagyott blokkhely, " +
                       $"életjel: {(current.Heartbeat ? "elküldve" : "még nincs")}.";
-        results.Add(current.MissedInRow switch
-        {
-            0 => new(CheckNames.MissedSlots, Level.Ok, "A node újra gyárt blokkot", summary, null, facts),
-            var k when k >= O.MissedSlotsBeforeRestart => new(CheckNames.MissedSlots, Level.Critical,
-                "A node nem gyártja a blokkjait",
-                $"Kiválasztott validátorként {k} saját blokkhelye maradt egymás után üresen. {summary}",
-                current.MissedInRowSince, facts),
-            var k => new(CheckNames.MissedSlots, Level.Warning, "Kimaradt egy saját blokk",
-                $"Kiválasztott validátorként {k} saját blokkhelye maradt üresen (a láncon minden tizedik körüli slot üres " +
-                $"marad, ez önmagában még nem hiba). {summary}", current.MissedInRowSince, facts),
-        });
 
-        var atRisk = info.Progress >= O.OfflineRiskProgress && current.Authored == 0 && !current.Heartbeat;
+        if (!current.Selected)
+        {
+            results.Add(new(CheckNames.MissedSlots, Level.Ok, "A kiválasztott session véget ért", "A blokkhelyek figyelése szünetel."));
+        }
+        else
+        {
+            // When a large part of the whole chain's slots stays empty, the cause is not this node: no escalation.
+            var chainTrouble = emptyRate > O.ChainEmptySlotsLimit;
+            results.Add(current.MissedInRow switch
+            {
+                0 => new(CheckNames.MissedSlots, Level.Ok, "A node újra gyárt blokkot", summary, null, facts),
+                var k when k >= O.MissedSlotsBeforeRestart && !chainTrouble => new(CheckNames.MissedSlots, Level.Critical,
+                    "A node nem gyártja a blokkjait",
+                    $"Kiválasztott validátorként {k} saját blokkhelye maradt egymás után üresen. {summary}",
+                    current.MissedInRowSince, facts),
+                var k => new(CheckNames.MissedSlots, Level.Warning, "Kimaradt egy saját blokk",
+                    $"Kiválasztott validátorként {k} saját blokkhelye maradt üresen" +
+                    (chainTrouble
+                        ? $" (a láncon most a slotok {emptyRate:P0}-a üres, ez nem a node hibája). "
+                        : " (a láncon kb. minden tizedik slot üres marad, ez önmagában még nem hiba). ") + summary,
+                    current.MissedInRowSince, facts),
+            });
+        }
+
+        // Every validator that is not chilled must show it is online in every session, selected or not.
+        var atRisk = current.Expected && judgeable && info.Progress >= O.OfflineRiskProgress && current.Authored == 0 &&
+                     !current.Heartbeat && !info.KeysMissing;
         results.Add(atRisk
             ? new(CheckNames.OfflineRisk, Level.Critical, "A node offline-nak fog számítani",
-                $"A session {info.Progress:P0}-ánál tart, de a node még egy blokkot sem gyártott, és életjelet sem küldött. " +
-                "Ha a session végéig így marad, a lánc offline-nak jelöli (Faulted, büntetés lehet).", now, facts)
+                $"A #{info.Index} session {info.Progress:P0}-ánál tart, de a node még egy blokkot sem gyártott, és életjelet " +
+                "sem küldött. Ha a session végéig így marad, a lánc offline-nak jelöli (Faulted, büntetés lehet).", now, facts)
             : new(CheckNames.OfflineRisk, Level.Ok, "A node jelentkezett ebben a sessionben", summary, null, facts));
+
+        results.Add(info.KeysMissing && current.Expected
+            ? new(CheckNames.Keys, Level.Critical, "Hiányzik a validátor im_online kulcsa",
+                "Az ImOnline.MissingKeys szerint a validátornak nincs im_online session kulcsa, így életjelet sem tud küldeni, " +
+                "és minden session végén offline-nak jelöli a lánc. Újraindítás ezen nem segít: a session kulcsokat be kell " +
+                "állítani (rotateKeys + setKeys).", now)
+            : new(CheckNames.Keys, Level.Ok, "A validátor im_online kulcsa rendben", ""));
+    }
+
+    /// <summary>Share of the chain's slots without a block over the last minutes; null until there are enough samples.</summary>
+    private double? ChainEmptyRate(SessionInfo info, DateTimeOffset now)
+    {
+        _samples.Enqueue((now, info.CurrentSlot, info.Block));
+        while (_samples.Count > 0 && now - _samples.Peek().At > TimeSpan.FromMinutes(5)) _samples.Dequeue();
+        var first = _samples.Peek();
+        var slots = (long)info.CurrentSlot - (long)first.Slot;
+        if (slots < 20) return null;
+        return Math.Clamp(1.0 - (double)(info.Block - first.Block) / slots, 0, 1);
     }
 
     private void Notify(SessionInfo info, DateTimeOffset now, List<CloudEvent> notices)
@@ -224,12 +297,12 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
 
     private IEnumerable<CheckResult> SessionResult()
     {
-        if (S.History.LastOrDefault() is not { } last) yield break;
+        if (S.History.LastOrDefault(r => r.Expected && !r.Unknown) is not { } last) yield break;
         yield return last.Offline
             ? new(CheckNames.SessionResult, Level.Warning, "Az előző sessionben nem jelentkezett a node",
-                $"A #{last.Index} sessionben ki volt választva, de nem gyártott blokkot és életjelet sem küldött. A lánc " +
-                "ilyenkor offline-nak jelöli (Faulted, büntetés lehet).", last.EndedAt)
-            : new(CheckNames.SessionResult, Level.Ok, "A legutóbbi kiválasztott sessionben rendben dolgozott",
+                $"A #{last.Index} sessionben {(last.Selected ? "ki volt választva, de " : "")}nem gyártott blokkot, és életjelet " +
+                "sem küldött. A lánc ilyenkor offline-nak jelöli (Faulted, büntetés lehet).", last.EndedAt)
+            : new(CheckNames.SessionResult, Level.Ok, "A legutóbbi sessionben rendben jelentkezett a node",
                 $"A #{last.Index} sessionben {last.Authored} blokk, életjel: {(last.Heartbeat ? "igen" : "nem")}.");
     }
 
@@ -269,21 +342,24 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
         var from = now - TimeSpan.FromHours(24);
         var sessions = S.History.Where(r => r.EndedAt >= from).ToList();
         if (S.Current is { } running) sessions.Add(running);
-        var restarts = state.RecentRestarts.Count(t => t >= from);
+        var selected = sessions.Where(r => r.Selected).ToList();
         var offline = sessions.Count(r => r.Offline);
-        var text = sessions.Count == 0
+        var restarts = state.RecentRestarts.Count(t => t >= from);
+        var text = selected.Count == 0
             ? "Az elmúlt 24 órában nem választották ki" +
               (S.LastSelectedAt is { } last ? $" (utoljára: {config.Local(last):MM.dd. HH:mm})." : ".")
-            : $"Az elmúlt 24 órában {sessions.Count}× választották ki: {sessions.Sum(r => r.Authored)} blokk, " +
-              $"{sessions.Sum(r => r.Missed)} kihagyott blokkhely, " +
-              (offline == 0 ? "minden sessionben jelentkezett." : $"{offline} sessionben nem jelentkezett (offline).");
+            : $"Az elmúlt 24 órában {selected.Count}× választották ki: {selected.Sum(r => r.Authored)} blokk, " +
+              $"{selected.Sum(r => r.Missed)} kihagyott blokkhely.";
+        text += offline == 0
+            ? " Minden sessionben jelentkezett (blokk vagy életjel)."
+            : $" {offline} sessionben nem jelentkezett (offline).";
         text += $" Validátor: {snapshot.Validator?.Kind.ToString() ?? "ismeretlen"}." +
                 (restarts == 0 ? " Újraindítás nem volt." : $" Újraindítás: {restarts}×.");
         return events.Info("summary", config.Local(now).ToString("yyyy-MM-dd"), "Napi összesítés", text, now,
             new Dictionary<string, object?>
             {
-                ["selected"] = sessions.Count, ["authored"] = sessions.Sum(r => r.Authored),
-                ["missed"] = sessions.Sum(r => r.Missed), ["offline"] = offline, ["restarts"] = restarts,
+                ["selected"] = selected.Count, ["authored"] = selected.Sum(r => r.Authored),
+                ["missed"] = selected.Sum(r => r.Missed), ["offline"] = offline, ["restarts"] = restarts,
             });
     }
 

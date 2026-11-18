@@ -195,8 +195,9 @@ ha nem olvasható, a NodeWatch úgy veszi, hogy épp most volt egy. A `check` pa
 A Mosaic nem minden validátort használ minden sessionben. Kb. óránként (legalább 45 percenként) a lánc kiválaszt egy
 részhalmazt (jelenleg 200 validátort) a nem chillelt validátorok közül, úgy, hogy egy hét alatt mindenki nagyjából
 egyformán sorra kerüljön. A kiválasztottak felváltva gyártják a blokkokat a 6 másodperces slotokban. A kiválasztott
-validátornak a session alatt legalább egy blokkot kell gyártania, vagy „életjelet” (heartbeat) kell küldenie, különben a
-session végén offline-nak jelöli a lánc (`Faulted`, büntetés lehet).
+A nem chillelt validátoroknak (kiválasztva vagy sem) minden sessionben legalább egy blokkot kell gyártaniuk, vagy
+„életjelet” (heartbeat) kell küldeniük, különben a session végén offline-nak jelöli őket a lánc (`Faulted`, büntetés lehet).
+Az életjelet a node magától küldi a session második felében.
 
 Ha a `ValidatorAddress` meg van adva, a NodeWatch ezt is figyeli:
 
@@ -204,11 +205,16 @@ Ha a `ValidatorAddress` meg van adva, a NodeWatch ezt is figyeli:
 |---|---|
 | A következő sessionre kiválasztották | info: „Kiválasztottak a következő sessionre”, a várható időponttal |
 | Egy saját blokkhely üresen maradt | figyelmeztetés (a láncon kb. minden tizedik slot üres marad, ez önmagában nem hiba) |
-| Két saját blokkhely egymás után üres | kritikus + **azonnali újraindítás** |
-| A session 85%-ánál még nincs blokk és életjel sem | kritikus + **azonnali újraindítás** (így még a session vége előtt elküldheti az életjelet) |
-| Az előző kiválasztott session offline-nal zárult | figyelmeztetés |
+| Két saját blokkhely egymás után üres | kritikus + **azonnali újraindítás** (kivéve, ha közben a láncon is sok slot üres: az nem a node hibája) |
+| A session 85%-ánál még nincs blokk és életjel sem (minden sessionben, nem csak kiválasztottban) | kritikus + **azonnali újraindítás** (így még a session vége előtt elküldheti az életjelet) |
+| Hiányzik a validátor `im_online` kulcsa | kritikus, újraindítás nélkül (azon nem segít: a session kulcsokat kell beállítani) |
+| Az előző session offline-nal zárult | figyelmeztetés |
 | 24 órája nem választották ki, pedig választható | figyelmeztetés |
 | Napi összesítés (alapból reggel 8-kor) | info: hányszor választották ki, blokkok, kihagyott helyek, újraindítások |
+
+A blokkhelyeket csak akkor ítéli meg, ha a node szinkronban van, fut a chain szolgáltatás, és nincs folyamatban
+újraindítás. Így egy éppen visszatérő node-ot nem hibáztat a kimaradt helyekért, és egy újraindítás előtti hiba miatt
+sem indít újra azonnal (ilyenkor a szokásos 10 percet várja).
 
 Az info üzenetekhez a kimenet `MinSeverity` értéke `info` legyen. Az időpontok a `TimeZone` beállítás szerint
 jelennek meg, ez magyar időhöz `Europe/Budapest`.

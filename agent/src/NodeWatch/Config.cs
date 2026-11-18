@@ -69,6 +69,7 @@ internal sealed class Config
         if (Selection.MissedSlotsBeforeRestart < 1) e.Add("Selection.MissedSlotsBeforeRestart legalább 1 legyen.");
         if (Selection.OfflineRiskProgress is <= 0 or > 1) e.Add("Selection.OfflineRiskProgress 0 és 1 közötti legyen.");
         if (Selection.SlotSeconds < 1) e.Add("Selection.SlotSeconds legalább 1 legyen.");
+        if (Selection.ChainEmptySlotsLimit is <= 0 or > 1) e.Add("Selection.ChainEmptySlotsLimit 0 és 1 közötti legyen.");
         if (Selection.MissedSlotGraceSeconds < Selection.SlotSeconds)
             e.Add("Selection.MissedSlotGraceSeconds legalább egy slot hossza legyen.");
         if (!Uri.TryCreate(Node.RelayRpc, UriKind.Absolute, out _)) e.Add("Node.RelayRpc nem érvényes URL.");
@@ -266,6 +267,10 @@ internal sealed class SelectionOptions
     /// <summary>Selected, but no block and no "I am online" heartbeat by this part of the session (the heartbeat goes out
     /// by 80% at the latest): the chain would mark the validator offline at the end of the session.</summary>
     public double OfflineRiskProgress { get; set; } = 0.85;
+
+    /// <summary>When more than this share of the whole chain's slots stayed empty, the cause is not
+    /// this node: missed own slots stay a warning and do not restart (measured over the last 5 minutes).</summary>
+    public double ChainEmptySlotsLimit { get; set; } = 0.25;
 
     /// <summary>An own slot is judged this long after it started (the block needs time to get into the chain).</summary>
     public int MissedSlotGraceSeconds { get; set; } = 60;

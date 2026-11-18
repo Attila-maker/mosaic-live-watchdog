@@ -52,10 +52,13 @@ internal static class CheckNames
     /// <summary>The session data cannot be read (RPC or runtime change).</summary>
     public const string SessionData = "validator.session_data";
 
+    /// <summary>The validator has no im_online key: it cannot send heartbeats.</summary>
+    public const string Keys = "validator.keys";
+
     public static readonly HashSet<string> All =
     [
         RelayRpc, RelayBlocks, RelayFullPeers, ParaRpc, ParaFinality, ParaSync, Validator, Disk,
-        MissedSlots, OfflineRisk, SessionResult, NotSelected, SessionData,
+        MissedSlots, OfflineRisk, SessionResult, NotSelected, SessionData, Keys,
     ];
 
     /// <summary>Checks that a node restart disturbs: frozen during the grace period after a restart.</summary>

@@ -68,9 +68,10 @@ internal sealed class RestartGuard(Config config, EventFactory events, IRestarte
                 state.RestartAlertOpen = false;
                 state.RestartAlertSince = null;
             }
-            state.RestartRefusedNotified = false;
             _saveFailedNotified = false;
         }
+        // One "not restarting" notice per limit period, even if the trigger comes and goes meanwhile.
+        if (state.RestartRefusedNotified && NextAllowed(now) <= now) state.RestartRefusedNotified = false;
 
         // When may the agent judge the node? Not while the unit is down or starting, not during an update, not across a
         // gap in the polls; and only from the first poll after these.
@@ -92,7 +93,8 @@ internal sealed class RestartGuard(Config config, EventFactory events, IRestarte
         var since = failingSince > _judgeableSince.Value ? failingSince : _judgeableSince.Value;
         var down = now - since;
         // A selected node that does not work loses its slots in the session: no waiting for those triggers.
-        var immediate = failing.Any(r => o.ImmediateTriggers.Contains(r.Name));
+        // Only for a problem that started after the node could be judged (not one left over from before a restart).
+        var immediate = failing.Any(r => o.ImmediateTriggers.Contains(r.Name) && (r.Since ?? now) >= _judgeableSince.Value);
         if (!immediate && down < TimeSpan.FromMinutes(o.AfterMinutes)) return output;
 
         var reasons = string.Join("; ", failing.Select(r => r.Title));

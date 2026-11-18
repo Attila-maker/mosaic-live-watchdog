@@ -33,8 +33,9 @@ relay service. When the node is stuck for 10 minutes, it restarts the chain serv
 | `host.disk` | Free space on the node's data disk is low (15% / 5%), or it cannot be read | warning / critical |
 | `agent` | NodeWatch itself failed 5 polls in a row, so it cannot watch (or restart) the node | critical |
 | `validator.missed_slots` | Selected for the session, but its own block slot stayed empty / two in a row | warning / critical |
-| `validator.offline_risk` | Selected, 85% of the session is over, and still no block and no "I am online" heartbeat | critical |
-| `validator.session` | The last selected session ended with no block and no heartbeat (the chain marks it offline) | warning |
+| `validator.offline_risk` | 85% of the session is over, and still no block and no "I am online" heartbeat (every session, selected or not) | critical |
+| `validator.session` | The last session ended with no block and no heartbeat (the chain marks it offline) | warning |
+| `validator.keys` | The validator has no `im_online` session key (`ImOnline.MissingKeys`), so it cannot send heartbeats | critical |
 | `validator.not_selected` | Not selected for 24 hours although it is selectable (not chilled) | warning |
 | `validator.session_data` | The session data cannot be read (the selection watching pauses) | warning |
 
@@ -80,21 +81,28 @@ All of these numbers can be changed in the config (`Restart` section), and the w
 Mosaic does not use every validator in every session. About every hour (`ValidatorSubsetSelection`, at least 45
 minutes) the runtime selects a subset (currently 200) of the validators that are not chilled, with an algorithm that
 spreads the selections evenly over a week. The selected validators take turns in the 6-second Aura slots: author of
-slot *s* = the (*s* mod *n*)-th selected validator, so each gets a slot about every *n* × 6 seconds. A selected
-validator must author at least one block or send an "I am online" heartbeat (`ImOnline`) during the session; otherwise
-it is reported offline at the end of the session, which can make it `Faulted` and slash it.
+slot *s* = the (*s* mod *n*)-th selected validator, so each gets a slot about every *n* × 6 seconds. Every validator
+that is not chilled, selected or not, must author a block or send an "I am online" heartbeat (`ImOnline`, sent by the
+node after half of the session) in every session; otherwise it is reported offline at the end of the session, which can
+make it `Faulted` and slash it.
 
 With `Node.ValidatorAddress` set, NodeWatch reads all this from the chain (`Session`, `Aura`, `ImOnline`,
 `ValidatorSubsetSelection` storage, through the safe RPC) and:
 
 - sends an **info message when the validator is selected** for the next session, with the expected time;
 - while selected, **checks each of its own slots** a minute after it: one empty slot is a warning (about every tenth slot
-  of the chain stays empty anyway), two in a row are critical and restart the chain at once;
-- if **85% of the selected session** is over with no block and no heartbeat, alerts and restarts at once, so the node may
-  still send its heartbeat before the session ends;
-- warns if the last selected session ended **offline**, and if the validator has **not been selected for 24 hours**
-  although it could be;
+  of the chain stays empty anyway), two in a row are critical and restart the chain at once — unless a large part of
+  the whole chain's slots is empty too (then it is not this node's fault);
+- if **85% of a session** is over with no block and no heartbeat, alerts and restarts at once, so the node may still send
+  its heartbeat before the session ends;
+- alerts (without restart) if the validator has **no `im_online` key**: then it can never send a heartbeat;
+- warns if the last session ended **offline**, and if the validator has **not been selected for 24 hours** although it
+  could be;
 - sends a **daily summary** (at 8:00 by default): how many times it was selected, blocks, missed slots, restarts.
+
+Slots are only judged while the node is in sync, its chain unit runs and no restart is in progress, so a node that comes
+back is never blamed for the slots it had no chance at; a problem left over from before an agent or node restart waits
+the normal 10 minutes instead of restarting at once.
 
 Selection notices and the summary are `info` messages: set the output's `MinSeverity` to `info` to get them.
 `nodewatch check` shows the current session and whether the validator is selected now or for the next one.

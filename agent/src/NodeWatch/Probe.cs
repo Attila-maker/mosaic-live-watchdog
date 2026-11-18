@@ -97,6 +97,10 @@ internal sealed record SessionInfo
     /// <summary>ImOnline.ReceivedHeartbeats(session, us): our "I am online" arrived in this session.</summary>
     public bool Heartbeat { get; init; }
 
+    /// <summary>ImOnline.MissingKeys(us): the validator has no im_online session key, so it cannot send heartbeats and
+    /// is reported offline at the end of every session it is not selected and producing in.</summary>
+    public bool KeysMissing { get; init; }
+
     /// <summary>Aura slot of the block read.</summary>
     public ulong CurrentSlot { get; init; }
 
@@ -307,6 +311,7 @@ internal sealed class NodeProbe : IProbe
         var sessionKey = StorageKeys.U32(index);
         var authored = await Read(StorageKeys.DoubleMap("ImOnline", "AuthoredBlocks", sessionKey, account));
         var heartbeat = await Read(StorageKeys.DoubleMap("ImOnline", "ReceivedHeartbeats", sessionKey, account));
+        var keysMissing = await Read(StorageKeys.Map("ImOnline", "MissingKeys", account));
         return new SessionInfo
         {
             Index = index,
@@ -317,6 +322,7 @@ internal sealed class NodeProbe : IProbe
             AuthorityCount = _sets.AuthorityCount,
             Authored = authored is null ? 0 : Scale.U32(authored),
             Heartbeat = heartbeat is { Length: > 0 } && heartbeat[0] != 0,
+            KeysMissing = keysMissing is not null,
             CurrentSlot = Scale.U64(await Need("Aura", "CurrentSlot")),
             Block = JsonRpc.ParseNumber(header),
             SessionEnd = Scale.U32(await Need("ValidatorSubsetSelection", "CurrentSessionEnd")),
