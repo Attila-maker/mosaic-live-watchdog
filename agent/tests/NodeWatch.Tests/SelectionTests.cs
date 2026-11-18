@@ -265,6 +265,29 @@ internal static class SelectionTests
     }
 
     [Test]
+    public static async Task Crash_and_systemd_restart_between_polls_does_not_continue_the_streak()
+    {
+        var w = NewWorld();
+        await w.RunFor(TimeSpan.FromMinutes(12)); // 06:12:00
+        // 200 validators, own slots at 06:12:18, 06:32:18, 06:52:18 (20 minutes apart).
+        w.Sim.Count = 200;
+        w.Sim.SessionLength = 1200;
+        w.Sim.Start(w.Now, 101, myIndex: 123);
+        w.Sim.Produce = false;
+        await w.RunFor(TimeSpan.FromMinutes(20)); // the 06:12:18 slot is a natural miss
+        Assert.Equal(1, w.Titled("Kimaradt egy saját blokk").Count, "first miss");
+        // 06:32:00: the node crashes over its 06:32:18 slot; systemd brings it back at 06:32:40.
+        w.Sim.Error = "connection refused";
+        await w.RunFor(TimeSpan.FromMinutes(1)); // 06:33:00
+        w.Sim.Error = null;
+        w.Probe.ChainActiveSince = w.Now - TimeSpan.FromSeconds(20);
+        await w.RunFor(TimeSpan.FromSeconds(30)); // first read after the crash: the crash slot had no block
+        w.Sim.Produce = true;
+        await w.RunFor(TimeSpan.FromMinutes(18));
+        Assert.Equal(0, w.Restarter.Count, "the node came back by itself: the crash slot does not make two in a row");
+    }
+
+    [Test]
     public static async Task Chain_wide_empty_slots_do_not_restart()
     {
         var w = NewWorld();

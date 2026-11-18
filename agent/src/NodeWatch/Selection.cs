@@ -82,6 +82,12 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
     /// <summary>The best block's slot is older than this: the node (or the chain) is not producing, slots are not judged.</summary>
     private static readonly TimeSpan StaleSlot = TimeSpan.FromMinutes(2);
 
+    /// <summary>After the chain unit starts, the node needs this long to catch up before its slots count.</summary>
+    private static readonly TimeSpan CatchUp = TimeSpan.FromMinutes(3);
+
+    /// <summary>When the chain unit last started, as seen from its active time.</summary>
+    private DateTimeOffset? _unitStartedAt;
+
     /// <summary>(slot, block) samples of the last minutes, for the chain-wide empty slot rate.</summary>
     private readonly Queue<(DateTimeOffset At, ulong Slot, long Block)> _samples = new();
 
@@ -187,6 +193,25 @@ internal sealed class SelectionWatcher(Config config, EventFactory events, Agent
             : null;
         var emptyRate = ChainEmptyRate(info, now);
         var n = (ulong)Math.Max(1, info.AuthorityCount);
+
+        // The unit (re)started, by anyone, even between two polls: the slots before it and while it caught up are not
+        // the running node's, and a miss streak from before the start does not continue.
+        if (snapshot.ChainActiveFor is { } activeFor)
+        {
+            var started = now - activeFor;
+            if (_unitStartedAt is not { } known || started - known > TimeSpan.FromSeconds(60))
+            {
+                _unitStartedAt = started;
+                var skipUntil = started + CatchUp;
+                var skipSlot = (ulong)(skipUntil.ToUnixTimeMilliseconds() / (O.SlotSeconds * 1000L));
+                if (skipSlot > current.SkipUpToSlot) current.SkipUpToSlot = skipSlot;
+                if (current.MissedInRowSince is { } streak && streak < skipUntil)
+                {
+                    current.MissedInRow = 0;
+                    current.MissedInRowSince = null;
+                }
+            }
+        }
 
         if (blockedReason is not null)
         {

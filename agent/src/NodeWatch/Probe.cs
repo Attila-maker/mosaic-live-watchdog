@@ -148,6 +148,9 @@ internal sealed class Snapshot
     public string? DiskError { get; set; }
     public SessionInfo? Session { get; set; }
     public string? SessionError { get; set; }
+
+    /// <summary>How long the chain unit has been active (systemd), if known: a restart shows as a new start time.</summary>
+    public TimeSpan? ChainActiveFor { get; set; }
 }
 
 internal interface IProbe
@@ -266,6 +269,8 @@ internal sealed class NodeProbe : IProbe
 
         var units = _config.Node.Services.Concat(_config.Restart.SkipWhileUnitsActive).Append(_config.Restart.Unit).Distinct();
         foreach (var unit in units) s.Services[unit] = await _services.StateAsync(unit, ct);
+        if (s.Services.GetValueOrDefault(_config.Restart.Unit) == "active")
+            s.ChainActiveFor = await _services.ActiveForAsync(_config.Restart.Unit, ct);
 
         try
         {

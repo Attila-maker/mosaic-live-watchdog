@@ -62,6 +62,7 @@ internal sealed class FakeProbe : IProbe, IServiceStatus
         if (DiskError is null) s.Disk = new DiskStatus("/var/lib/mosaic-mainnet", 40, 200);
         else s.DiskError = DiskError;
         s.Validator = Validator;
+        if (ChainState == "active" && ChainActiveSince is { } since) s.ChainActiveFor = now - since;
         if (Session is { } sim)
         {
             if (sim.Error is null) s.Session = sim.Read(now);
